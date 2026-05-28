@@ -1,0 +1,2310 @@
+---
+title: "Statistical Framework for Cross-Dataset Proteomics Analysis"
+subtitle: "Method selection, preprocessing, and reusable analysis features for an omics database"
+author:
+  - name: "Group 2: Achira, Danison, Emily"
+    affiliation: "The University of Sydney"
+date: today
+date-format: "D MMMM YYYY"
+
+format:
+  html:
+    theme: cosmo
+    css: styles/custom.css
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    number-sections: false
+    smooth-scroll: true
+    code-fold: true
+    code-tools: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    reference-location: margin
+    footnotes-hover: true
+    link-external-newwindow: true
+    page-layout: article
+    self-contained: true
+    embed-resources: true
+    bibliography: references.bib
+
+execute:
+  warning: false
+  message: false
+  freeze: auto
+
+editor: visual
+---
+
+## Executive Summary
+
+This report presents a statistical framework for proteomics analysis across datasets housed within a shared omics platform that is still under development. Its purpose is to support credible biological interpretation when evidence is drawn from multiple studies without assuming that common storage automatically permits common inference. A signal that recurs across studies may reflect genuine biology, yet it may just as easily be shaped by differences in experimental design or technical conditions. The framework is therefore built to distinguish what appears to be shared biological structure from what belongs to a specific study context, while preserving uncertainty in a form that remains interpretable after synthesis.
+
+The report combines preprocessing with cross-dataset modelling. The preprocessing stage converts heterogeneous submissions into an analysis-ready representation because the platform is expected to receive both full sample-level abundance matrices and reduced summary outputs. These input types support different kinds of inference, so the preprocessing component aligns feature identity while retaining provenance and statistical meaning.
+
+On that foundation, the report develops four workflows within a shared random-effects synthesis architecture. Each workflow estimates a study-level quantity within each dataset and then evaluates whether the corresponding signal is supported across studies rather than dominated by one experimental setting. Together, these workflows address protein-level treatment response, treatment-related variability, protein-level dependence, and coordinated pathway or module structure.
+
+Example demonstrations are further included within each workflow using a controlled synthetic multi-study collection designed to reflect the constraints expected in the client’s platform. Results are reported and interpreted appropriately, with specific mention of any assumptions and limitations that need to be accounted for. 
+
+## Problem Statement
+
+Metabolic disease research seeks to understand how cellular regulation breaks down in conditions such as insulin resistance and diabetes. The client studies these processes using proteomics and phosphoproteomics data collected across multiple independent experiments and compares protein-level changes across biological conditions to identify patterns that may explain metabolic dysfunction.
+
+To support this work, the client is building a software platform for storing and organising datasets across studies. The long-term value of this platform lies in its capacity for cross-dataset analysis, meaning the ability to assess whether a signal observed in one study remains detectable under different conditions and settings. At present, datasets are stored together but not analysed jointly in any principled way, and this gap is the central problem addressed in the report.
+
+Making cross-dataset analysis valid is statistically non-trivial. Proteomics studies differ not only in technical conditions but also in data granularity, since some contribute full abundance matrices whereas others contribute only summary-level outputs. Biological effects may vary genuinely across studies, while the combination of structurally informative missingness and high dimensionality makes naive per-protein estimation unstable. The aim of this report is therefore to identify a framework that supports valid and interpretable cross-dataset proteomics analysis under these constraints.
+
+## Preprocessing Framework
+
+In a cross-dataset platform, preprocessing is the statistical layer that determines whether later comparisons are meaningful. It converts heterogeneous proteomics data into a consistent representation before formal modelling begins. Without this step, differences between studies may reflect technical artefacts or incompatible feature definitions rather than biological signal.
+
+The preprocessing stage must also preserve data granularity. Some studies will provide full sample-level abundance matrices with metadata, whereas others will contain only reduced-form summaries. These inputs cannoted be treated as interchangeable, so the workflow keeps the sample-level and summary-level pathways distinct before they converge on an analysis-ready study object. The main preprocessing stages are summarised in @fig-preprocessing-workflow. 
+
+::: mermaid-pretty
+```{mermaid}
+%%| label: fig-preprocessing-workflow
+%%| fig-cap: "Preprocessing workflow for converting heterogeneous proteomics submissions into an analysis-ready study object."
+%%{init: {
+  'theme': 'base',
+  'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 54, 'htmlLabels': true},
+  'themeVariables': {
+    'fontFamily': 'Inter, Source Sans Pro, sans-serif',
+    'fontSize': '36px',
+    'lineColor': '#7a8c88',
+    'primaryTextColor': '#172126',
+    'secondaryTextColor': '#172126',
+    'tertiaryTextColor': '#172126',
+    'clusterBkg': '#f6fbfd',
+    'clusterBorder': '#d8e2df'
+  }
+}}%%
+flowchart LR
+  A("Study submission"):::entry --> B{"Data form"}:::decision
+
+  B --> C0
+  B --> S0
+
+  C0["Sample-level pathway"]:::label --> C1("Harmonise<br/>analyte identity"):::core
+  C1 --> C2("Log-transform<br/>abundances"):::core
+  C2 --> C3("Check technical<br/>variation"):::core
+  C3 --> C4("Record<br/>missingness"):::core
+  C4 --> C5("Align metadata"):::core
+  C5 --> I("Analysis-ready<br/>study object"):::output
+
+  S0["Summary-level pathway"]:::label --> S1("Harmonise<br/>analyte identity"):::support
+  S1 --> S2("Validate reported<br/>quantities"):::support
+  S2 --> S3("Preserve provenance<br/>and uncertainty"):::support
+  S3 --> I
+
+  classDef entry fill:#f6efe7,stroke:#bd8a6b,stroke-width:1.8px,color:#172126;
+  classDef decision fill:#f8f6ee,stroke:#8ea07c,stroke-width:1.8px,color:#172126;
+  classDef core fill:#edf5f2,stroke:#2f7c74,stroke-width:1.8px,color:#172126;
+  classDef support fill:#f7faf9,stroke:#a7bbb6,stroke-width:1.6px,color:#33454c;
+  classDef output fill:#e7eff5,stroke:#557f9b,stroke-width:2px,color:#172126;
+  classDef label fill:#f1ebff,stroke:#4905b5, stroke-width:1.8px,color:#2f5978,font-weight:bold;
+
+  linkStyle default stroke:#738783,stroke-width:2.4px,fill:none;
+```
+:::
+
+### 1. Harmonise analyte identity
+
+A consistent analyte definition must be first established across studies before analysis proceeds. The same protein may be recorded under different identifiers depending on the database or convention used by each study. Each measurement must therefore be mapped to a standard identifier so the same protein is recognised as such regardless of the contributing study. For phosphoproteomics data, where distinct phosphorylation sites on the same protein represent different regulatory events, the analyte should be indexed as a structured tuple such as $(\text{protein}, \text{residue}, \text{site position})$. This ensures site-level reproducibility can be assessed without confusing signals from different parts of the same protein. [@harmonise]
+
+### 2. Log-transform sample-level abundances
+
+Sample-level abundance measurements should be placed on a log scale before any modelling is applied. Raw proteomics intensities are often right-skewed and span widely in magnitude, making direct comparison on the original scale unreliable across studies. A logarithmic transformation addresses these properties by stabilising variance and compressing the dynamic range. It also makes the scale additive, allowing fold changes on the original scale to be interpreted as differences between groups. The choice of log base should be recorded and applied consistently across all sample-level datasets so that effect estimates remain directly comparable at the synthesis stage. [@logarithmic]
+
+### 3. Assess and adjust for technical variation
+
+Systematic technical variation should be identified and, where possible, explicitly adjusted for before within-study estimation proceeds. In proteomics, the most common sources of this variation are batch effects, which are systematic differences in measured abundance that arise from sample processing and measuring. Left unadjusted, these effects can inflate or suppress true signals. Diagnosis can involve tools such as Principal Component Analysis (PCA), which reveals whether samples cluster by batch or instrument rather than by biology, and Principal Variance Component Analysis (PVCA), which quantifies how much of the total variance is attributable to technical versus biological sources [@batchdetect]. Where a meaningful batch structure is detected, a statistical adjustment should be applied and documented, since cross-dataset analyses are only as interpretable as the comparability of the study-level estimates they receive.
+
+### 4. Represent missingness explicitly
+
+Missingness in proteomics is often informative rather than incidental. Features with lower abundance are more likely to fall below the instrument detection limit, so absence can reflect a structural property rather than a random data gap. In a cross-dataset setting this matters in two ways. Non-random missingness can bias within-study estimation, and differences in observation rates across studies can affect whether results are comparable or can be combined. Missingness should thus be recorded by analyte and by sample rather than being hidden through automatic imputation. Where imputation is applied, it should be treated with caution, as it can distort variance estimates and introduce artificial associations. [@missingness]
+
+### 5. Align metadata to measurements
+
+Each processed measurement must remain linked to a standardised metadata table so that the value can be interpreted within its study context. At minimum, the metadata should capture biological groupings and technical covariates required for adjustment, along with any design features relevant to inference such as pairing or repeated measures. Maintaining explicit and verified alignment between measurement and metadata is essential because study-level synthesis depends on knowing that comparable estimates were generated under comparable conditions. Errors introduced at this stage can invalidate later inference even when the statistical method itself is appropriate. [@alignment]
+
+### 6. Preserve context for reduced-form data
+
+Not all datasets will be available at full sample-level resolution. Some will enter the platform only as reduced-form summaries, such as estimated log fold-changes and standard errors. In these cases, the preprocessing step must preserve the contextual information needed to interpret and reuse those summaries correctly. A reduced-form record should therefore state what quantity was estimated, which biological contrast generated it, what scale was used, and what sample counts underlie it, along with the accompanying uncertainty measure. [@context]
+
+### Output of preprocessing
+
+After these steps, each study should be represented as a standardised analysis-ready study object. For sample-level datasets, this object contains the processed measurements, a missingness record, and aligned metadata with harmonised analyte annotations. For summary-level datasets, it contains the reduced-form estimates together with the provenance and uncertainty information required for valid downstream reuse. This standardised representation provides the common foundation on which all subsequent analytical components of the platform operate.
+
+## Simulated Dataset Description
+
+Because access to the platform’s live biological datasets was not available at this stage, a synthetic multi-study collection was constructed as a common evaluation substrate. Its purpose is to provide a controlled setting in which the proposed analytical workflows can be applied consistently and compared under known conditions. This is especially useful for illustrating how the framework behaves when studies differ in data granularity and when missingness is not random, both of which are expected features of the platform environment. The main structural features of the simulated collection are summarised in @tbl-simulated-dataset-overview.
+
+::::::: method-snapshot
+<div>
+
+<strong>Datasets</strong>
+
+<ul>
+
+<li><strong>9 datasets</strong> in total</li>
+
+<li><strong>400 proteins</strong> per dataset</li>
+
+</ul>
+
+</div>
+
+<div>
+
+<strong>Sample Sizes</strong>
+
+<ul>
+
+<li><strong>Total treated</strong> is 8-25 per dataset.</li>
+
+<li><strong>Total control</strong> is 8-25 per dataset.</li>
+
+<li><strong>2 experimental batches</strong> per dataset.</li>
+
+</ul>
+
+</div>
+
+<div>
+
+<strong>Granularity</strong>
+
+<ul>
+
+<li><strong>5 datasets</strong> stored in full-grain form</li>
+
+<li><strong>4 datasets</strong> stored in summary-grain form</li>
+
+</ul>
+
+</div>
+
+<div>
+
+<strong>Extra Structure</strong>
+
+<ul>
+
+<li><strong>Matched RNA, effects, correlation, pathway structure</strong> included.</li>
+
+<li><strong>Missingness</strong> built in</li>
+
+</ul>
+
+</div>
+:::::::
+
+Across the nine datasets, each study measures the same set of $400$ proteins, although $5$ contribute sample-level matrices and $4$ contribute summary-level inputs. The underlying signals are deliberately heterogeneous.
+
+The known generating structure is as follows:
+
+-   $20$ proteins carry a treatment effect, with small dataset-specific variations
+-   $20$ proteins have effects that appear in only $2\text{-}3$ datasets
+-   $15$ protein pairs assigned within-dataset Pearson correlation $0.70$.
+-   $6$ co-expression modules (size $8$) embedded with intra-module correlation $0.65$.
+-   $10$ pathways (size $30$), with the first enriched
+
+Missingness is introduced in a biologically plausible way (MNAR) by making lower-abundance values more likely to be absent, reflecting detection-limit behaviour often seen in proteomics. [@mnar]
+
+:::{.caution-note}
+The simulated collection is a controlled evaluation setting rather than a substitute for live biological validation. It allows the framework to be tested under known signal structure and mixed data granularity, but it assumes shared protein identity across datasets and uses simplified batch and dependence patterns. The results should therefore be read as evidence that the workflow behaves coherently under planned platform constraints rather than as proof that it captures the full complexity of real proteomics studies.
+:::
+
+```{r message=FALSE, warning=FALSE}
+# All libraries loaded here 
+library(kableExtra)
+library(knitr)
+library(tidyverse)
+library(broom)
+library(metafor)
+library(patchwork)
+library(car)
+library(limma)
+library(ggrepel)
+library(stringr)
+library(grid)
+
+# Helper functions
+## Table styling 
+pretty_table <- function(data, caption = NULL, digits = 2) {
+  data |>
+    mutate(across(where(is.numeric), ~ round(.x, digits))) |>
+    kable(caption = caption, align = "l", format = "html") |>
+    kable_styling(
+      full_width = TRUE,
+      bootstrap_options = c("striped", "hover", "condensed"),
+      position = "center"
+    ) |>
+    htmltools::HTML() 
+}
+
+## For pairwise / module-level correlation 
+add_latent_correlation <- function(abundance_noise, selected_proteins, sample_count, correlation_strength) {
+  shared_weight <- sqrt(correlation_strength)
+  residual_weight <- sqrt(1 - correlation_strength)
+  latent_signal <- rnorm(sample_count, mean = 0, sd = 0.4)
+
+  for (protein_id in selected_proteins) {
+    abundance_noise[protein_id, ] <- (shared_weight*latent_signal) + (residual_weight*rnorm(sample_count, mean = 0, sd = 0.4))
+  }
+  abundance_noise
+}
+
+## For computing per-protein treatment summaries in each dataset
+compute_protein_summary <- function(dataset) {
+  treated_samples <- dataset$sample_metadata$condition == "treated"
+  summary_matrix <- apply(dataset$protein_abundance, 1, function(protein_values) {
+    
+    treated_values <- protein_values[treated_samples & !is.na(protein_values)]
+    control_values <- protein_values[!treated_samples & !is.na(protein_values)]
+    treated_count <- length(treated_values)
+    control_count <- length(control_values)
+
+    if (treated_count < 3 || control_count < 3) {
+      return(c(log_fold_change = NA,
+               standard_error = NA,
+               t_statistic = NA,
+               p_value = NA,
+               treated_count = treated_count,
+               control_count = control_count))
+      }
+
+    log_fold_change <- mean(treated_values) - mean(control_values)
+    degrees_freedom <- treated_count + control_count - 2
+    pooled_variance <- ((treated_count - 1) * var(treated_values) + (control_count - 1)*var(control_values))/degrees_freedom
+    standard_error <- sqrt(pooled_variance * (1 / treated_count + 1 / control_count))
+    t_statistic <- log_fold_change / standard_error
+    p_value <- 2 * pt(-abs(t_statistic), df = degrees_freedom)
+
+    c(log_fold_change = log_fold_change,
+      standard_error = standard_error,
+      t_statistic = t_statistic,
+      p_value = p_value,
+      treated_count = treated_count,
+      control_count = control_count)
+  })
+  as_tibble(t(summary_matrix), rownames = "protein_id") |>
+    mutate(dataset_id = dataset$dataset_id)
+}
+
+# Main function to simulate data 
+simulate_proteomics_collection <- function(
+      dataset_count = 9,
+      full_data_dataset_count = 5,
+      protein_count = 400,
+      consistent_de_count = 20,
+      partial_de_count = 20,
+      correlated_pair_count = 15,
+      pair_correlation = 0.70,
+      module_count = 6,
+      proteins_per_module = 8,
+      module_correlation = 0.65,
+      pathway_count = 10,
+      proteins_per_pathway = 30,
+      pathway_1_de_fraction = 0.80,
+      rna_dataset_count = 2,
+      random_seed = 4026) {
+  
+  set.seed(random_seed)
+  protein_ids <- sprintf("protein_%04d", seq_len(protein_count))
+  dataset_ids <- sprintf("dataset_%02d", seq_len(dataset_count))
+
+  # True differential abundance effects
+  
+  consistent_de_proteins <- sample(protein_ids, consistent_de_count)
+  partial_de_proteins <- sample(setdiff(protein_ids, consistent_de_proteins), partial_de_count)
+  true_log_fold_change <- matrix(
+    0,
+    nrow = protein_count,
+    ncol = dataset_count,
+    dimnames = list(protein_ids, dataset_ids)
+  )
+  shared_effect_sizes <- rnorm(consistent_de_count, mean = 0, sd = 0.8)
+  shared_effect_sizes <- sign(shared_effect_sizes) * pmax(abs(shared_effect_sizes), 0.6)
+
+  true_log_fold_change[consistent_de_proteins, ] <- 
+    shared_effect_sizes +
+    matrix(
+        rnorm(consistent_de_count * dataset_count, mean = 0, sd = 0.1),
+        nrow = consistent_de_count,
+        ncol = dataset_count
+      )
+  for (protein_id in partial_de_proteins) {
+    active_dataset_count <- sample(2:max(2, floor(dataset_count / 2)), 1)
+    active_dataset_ids <- sample(dataset_ids, active_dataset_count)
+    effect_size <- rnorm(1, mean = 0, sd = 0.8)
+    effect_size <- sign(effect_size) * max(abs(effect_size), 0.6)
+    true_log_fold_change[protein_id, active_dataset_ids] <-
+      effect_size + rnorm(active_dataset_count, mean = 0, sd = 0.15)
+  }
+
+  # True pairwise / module-level correlation 
+  non_de_proteins <- setdiff(protein_ids, c(consistent_de_proteins, partial_de_proteins))
+  correlated_pairs <- matrix(sample(non_de_proteins, 2 * correlated_pair_count), ncol = 2, dimnames = list(NULL, c("protein_1", "protein_2")))
+  proteins_in_pairs <- as.vector(correlated_pairs)
+  module_candidate_proteins <- setdiff(non_de_proteins, proteins_in_pairs)
+  required_module_proteins <- module_count * proteins_per_module
+  module_members <- sample(module_candidate_proteins, required_module_proteins)
+  coexpression_modules <- split(module_members, ceiling(seq_along(module_members) / proteins_per_module))
+  names(coexpression_modules) <- sprintf("module_%02d", seq_along(coexpression_modules))
+
+  # Pathway annotations 
+  pathway_de_count <- min(length(consistent_de_proteins), round(pathway_1_de_fraction * proteins_per_pathway))
+  pathway_sets <- vector("list", pathway_count)
+  names(pathway_sets) <- sprintf("pathway_%02d", seq_len(pathway_count))
+  pathway_sets[[1]] <- c(
+    sample(consistent_de_proteins, pathway_de_count),
+    sample(setdiff(protein_ids, consistent_de_proteins), proteins_per_pathway - pathway_de_count)
+  )
+  for (pathway_index in 2:pathway_count) {
+    pathway_sets[[pathway_index]] <-
+      sample(setdiff(protein_ids, consistent_de_proteins), proteins_per_pathway)
+  }
+
+  # Sample-level datasets 
+  dataset_records <- vector("list", dataset_count)
+  for (dataset_index in seq_len(dataset_count)) {
+    dataset_id <- dataset_ids[dataset_index]
+    treated_count <- sample(8:25, 1)
+    control_count <- sample(8:25, 1)
+    sample_count <- treated_count + control_count
+    sample_metadata <- tibble(
+      sample_id = sprintf("%s_sample_%02d", dataset_id, seq_len(sample_count)),
+      dataset_id = dataset_id,
+      condition = c(rep("treated", treated_count), rep("control", control_count)),
+      batch = sample(c("B1", "B2"), sample_count, replace = TRUE)
+    )
+    treatment_indicator <- as.numeric(sample_metadata$condition == "treated")
+    batch_effect <- ifelse(sample_metadata$batch == "B2", 0.3, 0)
+    baseline_abundance <- rnorm(protein_count, mean = 8, sd = 1.5)
+    expected_abundance <- baseline_abundance %o% rep(1, sample_count) + true_log_fold_change[, dataset_index] %o% treatment_indicator
+    expected_abundance <- sweep(expected_abundance, 2, batch_effect, "+")
+    abundance_noise <- matrix(
+      rnorm(protein_count * sample_count, mean = 0, sd = 0.4),
+      nrow = protein_count,
+      ncol = sample_count,
+      dimnames = list(protein_ids, NULL))
+
+    for (pair_index in seq_len(nrow(correlated_pairs))) {
+      abundance_noise <- add_latent_correlation(
+        abundance_noise = abundance_noise,
+        selected_proteins = correlated_pairs[pair_index, ],
+        sample_count = sample_count,
+        correlation_strength = pair_correlation)
+    }
+
+    for (module_name in names(coexpression_modules)) {
+      abundance_noise <- add_latent_correlation(
+        abundance_noise = abundance_noise,
+        selected_proteins = coexpression_modules[[module_name]],
+        sample_count = sample_count,
+        correlation_strength = module_correlation)
+    }
+    protein_abundance <- expected_abundance + abundance_noise
+    rownames(protein_abundance) <- protein_ids
+    colnames(protein_abundance) <- sample_metadata$sample_id
+    missing_probability <- plogis(-(protein_abundance - mean(protein_abundance)) / 0.5) * 0.15
+    missing_entries <- matrix(
+      runif(length(protein_abundance)) < missing_probability,
+      nrow = nrow(protein_abundance),
+      ncol = ncol(protein_abundance)
+    )
+
+    protein_abundance[missing_entries] <- NA_real_
+    matched_rna <- NULL
+    if (dataset_index <= rna_dataset_count) {
+      matched_rna <- 0.6 * (protein_abundance - mean(protein_abundance, na.rm = TRUE)) +
+        matrix(rnorm(length(protein_abundance), mean = 0, sd = 0.8), nrow = nrow(protein_abundance), ncol = ncol(protein_abundance))
+      rownames(matched_rna) <- protein_ids
+      colnames(matched_rna) <- sample_metadata$sample_id
+    }
+
+    dataset_records[[dataset_index]] <- list(
+      dataset_id = dataset_id,
+      protein_abundance = protein_abundance,
+      matched_rna = matched_rna,
+      sample_metadata = sample_metadata
+    )
+  }
+
+  # Summary-grain datasets 
+  protein_summary_tables <- map(dataset_records, compute_protein_summary)
+  full_data_indices <- seq_len(full_data_dataset_count)
+  summary_only_indices <- (full_data_dataset_count + 1):dataset_count
+  list(full_data = dataset_records[full_data_indices],
+      summary_only = protein_summary_tables[summary_only_indices],
+      ground_truth = list(
+        consistent_de_proteins = consistent_de_proteins,
+        partial_de_proteins = partial_de_proteins,
+        correlated_pairs = as_tibble(correlated_pairs),
+        coexpression_modules = coexpression_modules,
+        pathway_sets = pathway_sets,
+        true_log_fold_change = true_log_fold_change))
+  }
+
+# Run the simulation 
+simulation_output <- simulate_proteomics_collection()
+
+full_data <- simulation_output$full_data
+summary_only <- simulation_output$summary_only
+truth <- simulation_output$ground_truth
+first_dataset <- full_data[[1]]
+first_summary <- summary_only[[1]]
+
+dataset_overview <- bind_rows(
+  map_dfr(full_data, \(dataset) {
+    tibble(
+      dataset_id = dataset$dataset_id,
+      data_type = "sample-level",
+      proteins = nrow(dataset$protein_abundance),
+      samples = ncol(dataset$protein_abundance),
+      matched_rna = if_else(is.null(dataset$matched_rna), "No", "Yes"),
+      missing_percent = 100 * mean(is.na(dataset$protein_abundance))
+    )
+  }),
+  map_dfr(summary_only, \(table) {
+    tibble(
+      dataset_id = unique(table$dataset_id),
+      data_type = "summary-only",
+      proteins = nrow(table),
+      samples = NA_integer_,
+      matched_rna = "No",
+      missing_percent = NA_real_
+    )
+  })
+)
+ground_truth_overview <- tibble(
+  component = c(
+    "Consistent DE proteins",
+    "Partial DE proteins",
+    "Correlated protein pairs",
+    "Co-expression modules",
+    "Pathway sets"
+  ),
+  count = c(
+    length(truth$consistent_de_proteins),
+    length(truth$partial_de_proteins),
+    nrow(truth$correlated_pairs),
+    length(truth$coexpression_modules),
+    length(truth$pathway_sets)
+  )
+)
+abundance_preview <- first_dataset$protein_abundance[1:6, 1:6] |>
+  round(2) |>
+  as.data.frame() |>
+  rownames_to_column("protein_id")
+summary_preview <- first_summary |>
+  slice_head(n = 8) |>
+  mutate(p_value = signif(p_value, 3))
+selected_proteins <- c(truth$consistent_de_proteins[1:4], truth$partial_de_proteins[1:4])
+true_logfc_preview <- truth$true_log_fold_change[selected_proteins, ] |>
+  round(2) |>
+  as.data.frame() |>
+  rownames_to_column("protein_id") |>
+  mutate(
+    signal_type = c(
+      rep("Consistent DE", 4),
+      rep("Partial DE", 4)
+    ),
+    .after = protein_id
+  )
+pathway_summary <- tibble(
+  pathway_id = names(truth$pathway_sets),
+  proteins = lengths(truth$pathway_sets),
+  consistent_de_proteins = vapply(
+    truth$pathway_sets,
+    \(proteins) sum(proteins %in% truth$consistent_de_proteins),
+    integer(1)
+  )
+)
+```
+
+::: panel-tabset
+## Dataset overview
+
+```{r}
+#| label: tbl-simulated-dataset-overview
+#| echo: false
+pretty_table(dataset_overview, caption = "Simulated dataset overview", digits = 1)
+```
+
+## Full-data input
+
+```{r}
+#| echo: false
+pretty_table(head(first_dataset$sample_metadata, 8), caption = "Example sample metadata")
+pretty_table(abundance_preview, caption = "Example protein abundance matrix")
+```
+
+## Summary-only input
+
+```{r}
+#| echo: false
+pretty_table(summary_preview, caption = "Example summary-only protein table")
+```
+
+## Ground truth
+
+```{r}
+#| echo: false
+pretty_table(ground_truth_overview, caption = "Ground-truth simulation structure")
+pretty_table(true_logfc_preview, caption = "True log fold-changes for selected simulated proteins")
+```
+
+## Pathway structure
+
+```{r}
+#| echo: false
+pretty_table(
+  pathway_summary,
+  caption = "Pathway-level ground truth"
+)
+```
+:::
+
+## Core Methods
+
+### Methods Preamble {#sec-method-preamble}
+
+The four frameworks developed in this section share a common inferential structure. Within each dataset $d$, a study-level summary is estimated for each protein $i$ or feature of interest, producing a point estimate and an associated standard error. These summaries are then synthesised across datasets using a meta-analytic model [@meta-analysis]. A naive approach to this pooling is the fixed-effect model, which assumes all datasets are estimating the same underlying quantity and weights each contribution purely by its within-study precision, $$\hat{\theta}_i^{\mathrm{FE}} = \frac{\sum_d w_{i,d}\hat{\theta}_{i,d}}{\sum_d w_{i,d}}, \qquad w_{i,d} = \frac{1}{\hat{\sigma}_{\theta_i,d}^2}$$ This is efficient when datasets are highly comparable, but the assumption of a single shared true effect is rarely tenable in proteomics, where true effects may vary across studies because of differences in cohort composition, tissue source, treatment context, or platform. A random-effects model is therefore chosen as the default, treating study-level estimates as draws from a distribution rather than noisy measurements of one fixed quantity, $$\hat{\theta}_{i,d} \sim N\left(\theta_i, \hat{\sigma}_{\theta_{i,d}}^2 + \tau_i^2\right)$$ where
+
+-   $\theta_i$ is the average cross-study target, the quantity the platform is trying to estimate, pooled across all contributing datasets\
+-   $\hat{\sigma}_{\theta_{i,d}}^2$ is the within-study variance of the estimate, reflecting how precisely $\hat{\theta}_{i,d}$ was measured in dataset $d$ given its sample size and quality.
+-   $\tau_i^2$ captures between-study heterogeneity, the extent to which the true effect genuinely varies across studies.
+
+The pooled estimate $\hat{\theta}_i^{\mathrm{RE}}$ is obtained as the inverse-weighted mean $$\hat{\theta}_i^{\mathrm{RE}} = \frac{\sum_d w_{i,d}^{\mathrm{RE}}\hat{\theta}_{i,d}}{\sum_d w_{i,d}^{\mathrm{RE}}}, \qquad w_{i,d}^{\mathrm{RE}} = \frac{1}{\hat{\sigma}_{\theta_i,d}^2+\hat{\tau}_i^2}$$
+
+Each dataset's contribution is therefore down-weighted when its within-study uncertainty is large or when the between-study variance is large, ensuring that noisier or more context-dependent estimates have less influence on the final pooled result. $\hat{\tau}_i^2$ is estimated by Restricted Maximum Likelihood (REML) [@reml], which is preferred over moment-based alternatives because it accounts for the degrees of freedom used in estimating the fixed effects before estimating the variance component. The confidence interval for $\hat{\theta}_i^{\mathrm{RE}}$ uses Knapp-Hartung adjusted inference [@Knapp-Hartung], which inflates the standard error of the pooled estimate when the contributing datasets are few, producing better-calibrated intervals than the standard normal approximation in that setting.
+
+Each of the following frameworks introduces its own estimand and modelling outputs after obtaining the specific $\hat{\theta}_{i,d}$ required. Additional assumptions are also specified where relevant and should be understood to applly after the preprocessing layer has already aligned identifiers and scales for comparability.
+
+#### Shared Assumptions
+
+At the synthesis stage, each study is assumed to contribute an estimate of the same underlying statistical target, even when the magnitude of that target is allowed to differ across studies. The random-effects formulation accommodates such variation through the between-study variance term, but it still requires a common estimand and a common measurement scale. The framework also treats datasets as approximately independent units. If studies share samples, reuse the same cohort, or inherit hidden dependence from a common upstream source, then the nominal meta-analytic uncertainty may be understated. A further assumption is that the reported within-study standard errors are reasonably well calibrated, since these directly determine the synthesis weights and therefore the influence of each dataset on the pooled result.
+
+#### Shared Implementation Defaults
+
+**Minimum dataset threshold**
+
+A feature enters cross-dataset synthesis only when analysable estimates are available from at least $4$ datasets. This threshold gives the heterogeneity estimate enough study-level information to be useful. With fewer contributing datasets, $\tau^2$ is driven by too little spread around the pooled mean, and Knapp-Hartung inference has too few degrees of freedom to produce informative intervals. 
+
+**Standard error screening**
+
+Extreme standard errors are flagged using a robust boundary defined as the sample median plus five median absolute deviations across all feature-dataset pairs. A very large standard error relative to the rest of the collection usually indicates unstable estimation within a particular dataset. One common reason is that a protein is observed in only a small subset of samples. Flagged estimates are retained so that the output records where instability occurred, but their contribution to synthesis is naturally reduced through inverse-variance weighting.
+
+**Heterogeneity Summaries**
+
+Two complementary statistics are reported alongside every pooled estimate to characterise between-study variation.
+
+The first is $\tau^2$, the estimated between-study variance on the scale of the estimand itself. This is the most directly interpretable measure of heterogeneity because it quantifies how much the true effect varies across studies in the original units of analysis. Larger values of $\tau^2$ indicate greater cross-study dispersion in the true underlying effect and therefore wider random-effects uncertainty intervals.
+
+The second is $I^2$, which expresses heterogeneity as the proportion of total observed variation attributable to real between-study differences rather than within-study sampling error [@I-squared], $$I^2 = \max\left\{0, \frac{\hat{\tau}_i^2}{\hat{\tau}_i^2 + \tilde{\sigma}_i^2}\right\} \times 100\%,$$ where $\tilde{\sigma}_i^2$ is a summary of the typical within-study variance across contributing datasets. Unlike $\tau^2$, $I^2$ is scale-free and therefore easier to compare across frameworks and feature types. When $\hat{\tau}_i^2$ reaches its boundary at zero, $I^2$ is correspondingly drawn to zero.
+
+**Heterogeneity classification**
+
+Pooled results are classified into three groups based on $I^2$:
+
+-   Low ($I^2 < 40\%$): the effect is broadly consistent across studies.
+-   Moderate ($40\% \leq I^2 < 75\%$): the pooled estimate still represents a meaningful average, but the magnitude of effect is context-dependent.
+-   High ($I^2 \geq 75\%$): the pooled estimate should be interpreted cautiously because study-specific effects may differ substantially.
+
+A near-zero $\hat{\tau}^2$ should be read as no detected heterogeneity under the fitted model rather than as proof of true homogeneity, since REML estimates often hit the zero boundary when only a small number of studies contribute [@zero-tau].
+
+**Multiple testing correction**
+
+Each framework evaluates many features simultaneously, ranging from individual proteins to higher-order structures, so some nominally significant results will occur by chance alone. False discovery rates are therefore controlled using the Benjamini-Hochberg procedure [@fdr]. This adjustment is applied separately within each framework across all features entering synthesis, and the size of the testing family is reported so that the level of multiplicity can be interpreted in context.
+
+```{r}
+#| echo: false 
+
+# global defaults 
+default_minimum_observation_rate <- 0.70
+default_minimum_group_count <- 3
+default_minimum_datasets_for_meta <- 4
+default_minimum_module_size <- 5
+default_minimum_module_coverage <- 0.50
+
+# shared display 
+effect_palette <- c(
+  accent = "#538539",
+  contrast = "#edb634",
+  neutral = "#468d9c",
+  pooled = "#94131a", 
+  dataset = "#4e9c80"
+)
+
+heterogeneity_palette <- c(
+  low = "#2f7c74",
+  moderate = "#d4956a",
+  high = "#cfd4d8"
+)
+
+direction_consistency_palette <- c(
+  "consistently positive" = effect_palette[["accent"]],
+  "consistently negative" = effect_palette[["contrast"]],
+  "sign inconsistent" = effect_palette[["neutral"]]
+)
+platform_theme <- function() {
+  theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, colour = "#172126", hjust = 0.5),
+      plot.subtitle = element_text(colour = "#556b6b", size = 10, hjust = 0.5),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = "#e8eeec", linewidth = 0.4),
+      legend.position = "bottom",
+      legend.key.size = unit(0.45, "cm"),
+      strip.text = element_text(face = "bold", size = 10, colour = "#172126"),
+      strip.background = element_rect(fill = "#eef1f4", colour = NA)
+    )
+}
+
+format_p_value <- function(p_values) {
+  case_when(
+    is.na(p_values) ~ "\u2014",
+    p_values < 0.001 ~ formatC(p_values, format = "e", digits = 1),
+    TRUE ~ as.character(round(p_values, 3))
+  )
+}
+
+render_output_table <- function(data, caption = NULL, digits = 3,
+                                p_cols = c("Meta p-value", "FDR")) {
+  data |>
+    mutate(
+      across(where(is.numeric), ~ round(.x, digits)),
+      across(any_of(p_cols), \(column_values) {
+        if (is.numeric(column_values)) format_p_value(column_values) else column_values
+      })
+    ) |>
+    kable(caption = caption, align = "l", format = "html") |>
+    kable_styling(
+      full_width = TRUE,
+      bootstrap_options = c("striped", "hover", "condensed")
+    ) |>
+    htmltools::HTML() |>
+    htmltools::div(class = "table-scroll-frame")
+}
+
+# data prep helpers
+prepare_dataset_metadata <- function(dataset) {
+  dataset$sample_metadata |>
+    mutate(
+      condition = factor(condition, levels = c("control", "treated")),
+      batch = factor(batch)
+    )
+}
+
+
+summarise_protein_observations <- function(abundance_matrix, metadata) {
+  treated_index <- metadata$condition == "treated"
+  control_index <- metadata$condition == "control"
+
+  tibble(
+    protein_id = rownames(abundance_matrix),
+    treated_observed = rowSums(!is.na(abundance_matrix[, treated_index, drop = FALSE])),
+    control_observed = rowSums(!is.na(abundance_matrix[, control_index, drop = FALSE])),
+    total_observed = rowSums(!is.na(abundance_matrix)),
+    observation_rate = total_observed / ncol(abundance_matrix)
+  )
+}
+
+filter_retained_proteins <- function(observation_summary,
+                                     minimum_group_count = default_minimum_group_count,
+                                     minimum_observation_rate = default_minimum_observation_rate) {
+  observation_summary |>
+    filter(
+      treated_observed >= minimum_group_count,
+      control_observed >= minimum_group_count,
+      observation_rate >= minimum_observation_rate
+    ) |>
+    pull(protein_id)
+}
+
+batch_adjust_vector <- function(abundance_values, batch_values) {
+  analysis_data <- tibble(
+    abundance = abundance_values,
+    batch = batch_values
+  ) |>
+    drop_na()
+
+  if (n_distinct(analysis_data$batch) < 2 || nrow(analysis_data) < 4) {
+    return(abundance_values)
+  }
+
+  adjusted_values <- rep(NA_real_, length(abundance_values))
+  batch_fit <- lm(abundance ~ batch, data = analysis_data)
+
+  adjusted_values[!is.na(abundance_values)] <-
+    residuals(batch_fit) + mean(analysis_data$abundance)
+
+  adjusted_values
+}
+
+build_condition_design <- function(metadata) {
+  design_formula <- if (n_distinct(metadata$batch) > 1) {
+    ~ condition + batch
+  } else {
+    ~ condition
+  }
+
+  design_matrix <- model.matrix(design_formula, data = metadata)
+  condition_coefficient <- grep("^condition", colnames(design_matrix), value = TRUE)
+
+  if (length(condition_coefficient) != 1) {
+    stop("Could not identify a unique treatment coefficient in the design matrix.")
+  }
+
+  list(
+    design_matrix = design_matrix,
+    condition_coefficient = condition_coefficient
+  )
+}
+
+flag_extreme_standard_errors <- function(standard_errors) {
+  threshold <- median(standard_errors, na.rm = TRUE) +
+    5 * mad(standard_errors, constant = 1, na.rm = TRUE)
+
+  if (!is.finite(threshold) || threshold <= 0) {
+    threshold <- Inf
+  }
+
+  standard_errors > threshold
+}
+
+# synthesis helpers 
+classify_heterogeneity <- function(i_squared) {
+  case_when(
+    i_squared >= 75 ~ "high",
+    i_squared >= 40 ~ "moderate",
+    TRUE ~ "low"
+  )
+}
+
+fit_random_effects_meta <- function(effect_data,
+                                    effect_col = "estimated_log_effect",
+                                    se_col = "standard_error") {
+  tryCatch(
+    rma(
+      yi = effect_data[[effect_col]],
+      sei = effect_data[[se_col]],
+      method = "REML",
+      test = "knha"
+    ),
+    error = function(error_condition) NULL
+  )
+}
+
+tidy_meta_fit <- function(meta_fit, feature_id, dataset_count,
+                          pooled_name = "pooled_effect",
+                          id_name = "feature_id") {
+  tibble(
+    !!id_name := feature_id,
+    dataset_count = dataset_count,
+    !!pooled_name := as.numeric(coef(meta_fit)),
+    confidence_interval_lower = meta_fit$ci.lb,
+    confidence_interval_upper = meta_fit$ci.ub,
+    pooled_p_value = as.numeric(meta_fit$pval),
+    cochran_Q = meta_fit$QE,
+    cochran_Q_p_value = meta_fit$QEp,
+    I_squared = meta_fit$I2,
+    tau_squared = meta_fit$tau2,
+    heterogeneity_level = classify_heterogeneity(meta_fit$I2)
+  )
+}
+
+compute_direction_agreement <- function(effects, standard_errors, tau_squared) {
+  random_effects_weights <- 1 / (standard_errors^2 + tau_squared)
+  nonzero_index <- effects != 0
+  if (!any(nonzero_index)) {
+    return(NA_real_)
+  }
+  positive_share <- sum(random_effects_weights[effects > 0]) /
+    sum(random_effects_weights[nonzero_index])
+  negative_share <- sum(random_effects_weights[effects < 0]) /
+    sum(random_effects_weights[nonzero_index])
+
+  max(positive_share, negative_share)
+}
+
+append_fdr <- function(data, p_col = "pooled_p_value") {
+  data |>
+    mutate(false_discovery_rate = p.adjust(.data[[p_col]], method = "BH"))
+}
+
+run_feature_meta_analysis <- function(feature_data,
+                                      id_col,
+                                      effect_col,
+                                      se_col = "standard_error",
+                                      minimum_datasets = default_minimum_datasets_for_meta,
+                                      pooled_name = "pooled_effect") {
+  if (n_distinct(feature_data$dataset_id) < minimum_datasets) {
+    return(tibble())
+  }
+
+  meta_fit <- fit_random_effects_meta(
+    effect_data = feature_data,
+    effect_col = effect_col,
+    se_col = se_col
+  )
+
+  if (is.null(meta_fit)) {
+    return(tibble())
+  }
+
+  tidy_meta_fit(
+    meta_fit = meta_fit,
+    feature_id = feature_data[[id_col]][[1]],
+    dataset_count = meta_fit$k,
+    pooled_name = pooled_name,
+    id_name = id_col
+  ) |>
+    mutate(
+      weighted_direction_agreement = compute_direction_agreement(
+        effects = feature_data[[effect_col]],
+        standard_errors = feature_data[[se_col]],
+        tau_squared = meta_fit$tau2
+      ),
+      flagged_se_count = sum(feature_data$extreme_se_flag)
+    )
+}
+
+run_leave_one_out_meta <- function(feature_id,
+                                   dataset_effects,
+                                   id_col,
+                                   effect_col,
+                                   se_col = "standard_error",
+                                   minimum_datasets = default_minimum_datasets_for_meta,
+                                   pooled_name = "pooled_effect") {
+  feature_data <- dataset_effects |>
+    filter(.data[[id_col]] == .env$feature_id)
+
+  if (n_distinct(feature_data$dataset_id) < minimum_datasets) {
+    return(tibble())
+  }
+
+  map_dfr(unique(feature_data$dataset_id), function(omitted_dataset_id) {
+    reduced_data <- feature_data |>
+      filter(dataset_id != omitted_dataset_id)
+
+    if (n_distinct(reduced_data$dataset_id) < (minimum_datasets - 1)) {
+      return(tibble())
+    }
+
+    meta_fit <- fit_random_effects_meta(
+      effect_data = reduced_data,
+      effect_col = effect_col,
+      se_col = se_col
+    )
+
+    if (is.null(meta_fit)) {
+      return(tibble())
+    }
+
+    tidy_meta_fit(
+      meta_fit = meta_fit,
+      feature_id = feature_id,
+      dataset_count = meta_fit$k,
+      pooled_name = pooled_name,
+      id_name = id_col
+    ) |>
+      mutate(omitted_dataset_id = omitted_dataset_id, .after = all_of(id_col))
+  })
+}
+
+build_heterogeneity_scatter <- function(data,
+                                        effect_col,
+                                        x_label,
+                                        title,
+                                        subtitle) {
+  ggplot(
+    data,
+    aes(x = .data[[effect_col]], y = I_squared, colour = heterogeneity_level)
+  ) +
+    geom_point(size = 2.6, alpha = 0.82) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "#7f8f8b", linewidth = 0.5) +
+    geom_hline(yintercept = c(40, 75), linetype = "dotted", colour = "#cfd8dc", linewidth = 0.45) +
+    scale_colour_manual(values = heterogeneity_palette) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = expression(I^2 ~ "(%)"),
+      colour = "Heterogeneity"
+    ) +
+    platform_theme()
+}
+```
+
+```{r}
+#| echo: false
+# extra shared plotting helpers
+build_forest_plot_data <- function(dataset_results,
+                                   pooled_results,
+                                   feature_id,
+                                   feature_col,
+                                   estimate_col,
+                                   pooled_estimate_col,
+                                   standard_error_col = "standard_error",
+                                   degrees_of_freedom_col = "degrees_of_freedom",
+                                   pooled_label = "Pooled random-effects") {
+  dataset_results |>
+    filter(.data[[feature_col]] == feature_id) |>
+    mutate(
+      critical_value = qt(0.975, df = pmax(.data[[degrees_of_freedom_col]], 1)),
+      confidence_interval_lower = .data[[estimate_col]] - critical_value * .data[[standard_error_col]],
+      confidence_interval_upper = .data[[estimate_col]] + critical_value * .data[[standard_error_col]]
+    ) |>
+    transmute(
+      label = dataset_id,
+      estimate = .data[[estimate_col]],
+      confidence_interval_lower = confidence_interval_lower,
+      confidence_interval_upper = confidence_interval_upper,
+      result_type = "Dataset"
+    ) |>
+    bind_rows(
+      pooled_results |>
+        filter(.data[[feature_col]] == feature_id) |>
+        transmute(
+          label = pooled_label,
+          estimate = .data[[pooled_estimate_col]],
+          confidence_interval_lower = confidence_interval_lower,
+          confidence_interval_upper = confidence_interval_upper,
+          result_type = "Pooled"
+        )
+    ) |>
+    mutate(
+      label = forcats::fct_reorder(label, estimate),
+      result_type = factor(result_type, levels = c("Dataset", "Pooled"))
+    )
+}
+
+build_forest_plot <- function(forest_plot_data, title, subtitle, x_label) {
+  ggplot(
+    forest_plot_data,
+    aes(x = estimate, y = label, colour = result_type)
+  ) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "#7f8f8b", linewidth = 0.5) +
+    geom_pointrange(
+      aes(xmin = confidence_interval_lower, xmax = confidence_interval_upper),
+      linewidth = 0.45
+    ) +
+    scale_colour_manual(values = c(
+      "Dataset" = effect_palette[["dataset"]],
+      "Pooled" = effect_palette[["pooled"]]
+    )) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = NULL,
+      colour = NULL
+    ) +
+    platform_theme()
+}
+
+build_interval_dot_plot <- function(data,
+                                    label_col,
+                                    estimate_col,
+                                    lower_col,
+                                    upper_col,
+                                    colour_col,
+                                    colour_values,
+                                    title,
+                                    subtitle,
+                                    x_label) {
+  plotting_data <- data |>
+    mutate(plot_label = forcats::fct_reorder(.data[[label_col]], .data[[estimate_col]]))
+
+  ggplot(
+    plotting_data,
+    aes(x = .data[[estimate_col]], y = plot_label, colour = .data[[colour_col]])
+  ) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "#7f8f8b", linewidth = 0.5) +
+    geom_pointrange(
+      aes(
+        xmin = .data[[lower_col]],
+        xmax = .data[[upper_col]]
+      ),
+      linewidth = 0.45
+    ) +
+    scale_colour_manual(values = colour_values) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = NULL,
+      colour = NULL
+    ) +
+    platform_theme()
+}
+
+build_joint_count_plot <- function(data,
+                                   category_col,
+                                   count_col,
+                                   fill_values,
+                                   title,
+                                   subtitle) {
+  plotting_data <- data |>
+    mutate(plot_category = forcats::fct_reorder(.data[[category_col]], .data[[count_col]]))
+
+  ggplot(
+    plotting_data,
+    aes(x = .data[[count_col]], y = plot_category, fill = plot_category)
+  ) +
+    geom_col(width = 0.65, alpha = 0.9, show.legend = FALSE) +
+    scale_fill_manual(values = fill_values) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = "Count",
+      y = NULL
+    ) +
+    platform_theme()
+}
+```
+
+------------------------------------------------------------------------
+
+### Framework 1: Cross-Dataset Effect Estimation
+
+Cross-dataset effect estimation addresses the question of whether a protein-level treatment effect is reproducible across studies rather than merely detectable within one. In a multi-study platform, this distinction matters because a signal appearing in a single dataset may reflect true biology or something particular to that study's cohort or design.
+
+Within each dataset $d$, a moderated linear model is fitted for every protein $i$: $$Y_{i,s,d} = \alpha_{i,d} + \beta_{i,d}X_{s,d} + \mathbf{c}_{s,d}^\top \boldsymbol{\gamma}_{i,d}+\varepsilon_{i,s,d}$$ Here, $Y_{i,s,d}$ is the log-abundance of protein $i$ in sample $s$, $X_{s,d}$ is the treatment indicator, and $\mathbf{c}_{s,d}$ contains adjustment covariates such as batch or processing run. The coefficient $\beta_{i,d}$ is the treated-versus-control log fold-change within dataset $d$.
+
+For datasets with sample-level measurements, $\hat{\beta}_{i,d}$ and its standard error $\hat{\sigma}_{\beta_{i,d}}$ are estimated through the `limma` framework [@limma]. Empirical Bayes moderation stabilises the residual variance by borrowing information across proteins, which is important when each protein has few samples [@empirical-bayes]. In the moderated formulation, the standard error can be written as $$\hat{\sigma}_{\beta_{i,d}} = u_{i,d}\sqrt{\tilde{\sigma}_{i,d}^{2}},$$ where $u_{i,d}$ is the unscaled coefficient standard error determined by the design matrix, and $\tilde{\sigma}_{i,d}^{2}$ is the moderated residual variance for protein $i$ in dataset $d$.
+
+This framework assumes that the treatment effect can be represented adequately through a linear contrast on the working scale within each dataset. It also requires the treated-versus-control coefficient to have the same interpretation across studies, so that pooling remains meaningful as an average of comparable effects rather than a mixture of different contrasts. Empirical Bayes moderation further assumes that borrowing information across proteins improves variance estimation because the proteins share enough residual structure to support stable shrinkage. The pooled effect should therefore be read as an average cross-study treatment signal, not as evidence that the magnitude of response is identical in every biological setting.
+
+::: callout-note
+Under the synthesis framework described in @sec-method-preamble, the study-level quantity for protein $i$ in dataset $d$ is $$\hat{\theta}_{i,d} = \hat{\beta}_{i,d}.$$ The corresponding cross-study estimand is the average treatment effect $$\beta_i = \mathbb{E}_d(\beta_{i,d}),$$
+:::
+
+The synthesis stage returns the pooled random-effects estimate $\hat{\beta}_i^{\mathrm{RE}}$, its confidence interval, the meta-analytic p-value, FDR, and the heterogeneity summaries. Directional agreement can be added as a reproducibility measure by quantifying the proportion of meta-analytic weight supporting the majority sign. This helps distinguish proteins with a stable direction of effect from proteins whose pooled estimate hides inconsistent study-level results.
+
+Leave-one-dataset-out refitting [@leave-one-out] provides a further robustness check. The synthesis is repeated after removing one dataset at a time, and large changes in the pooled estimate indicate that the result depends heavily on a single study. In the platform, this can be converted into a robustness flag when the pooled direction reverses or the effect size changes substantially after one omission.
+
+:::{.caution-note}
+This framework is valid only when the contributing studies estimate comparable treatment contrasts on compatible scales. Random-effects synthesis allows the true effect to vary across datasets, but it cannot repaid biological mismatches caused by difference treatment definitions or incompatible sample contexts. Summary-level inputs add a second constraint because their preprocessing and covariate adjustment may not be fully visible to the platform. Effect results should therefore be interpreted through the pooled estimate together with uncertainty, heterogeneity, directional agreement, and leave-one-dataset-out stability.
+:::
+
+::: feature-panel
+#### Research Case Example 1
+
+**Query**: <i>"Which treatment-associated protein changes are reproducible across studies?"</i>
+
+In this simulated collection, $5$ datasets contribute moderated sample-level estimates via `limma` and $4$ contribute summary-level inputs derived from a pooled two-sample t-test. Because summary-level standard errors are unmoderated, they tend to be larger than their limma-derived counterparts and are correspondingly down-weighted in synthesis. Proteins are included only if analysable estimates are available from at least $4$ of the $9$ datasets, and because the consistent DE proteins are known from the simulation ground truth, recovery can be assessed directly.
+
+**Analysis and Returned Outputs**
+
+```{r}
+# Within-dataset moderated effect estimation 
+estimate_within_dataset_effects <- function(dataset,
+                                            minimum_group_count = default_minimum_group_count,
+                                            minimum_observation_rate = default_minimum_observation_rate) {
+  metadata <- prepare_dataset_metadata(dataset)
+  abundance_matrix <- dataset$protein_abundance
+
+  observation_summary <- summarise_protein_observations(abundance_matrix, metadata)
+  retained_proteins <- filter_retained_proteins(
+    observation_summary,
+    minimum_group_count = minimum_group_count,
+    minimum_observation_rate = minimum_observation_rate
+  )
+
+  if (length(retained_proteins) == 0) {
+    return(tibble())
+  }
+
+  filtered_matrix <- abundance_matrix[retained_proteins, , drop = FALSE]
+  design_components <- build_condition_design(metadata)
+
+  moderated_fit <- lmFit(filtered_matrix, design_components$design_matrix) |>
+    eBayes()
+
+  tibble(
+    protein_id = rownames(filtered_matrix),
+    dataset_id = dataset$dataset_id,
+    estimated_log_effect = as.numeric(
+      moderated_fit$coefficients[, design_components$condition_coefficient]
+    ),
+    standard_error = as.numeric(
+      moderated_fit$stdev.unscaled[, design_components$condition_coefficient] *
+        sqrt(moderated_fit$s2.post)
+    ),
+    degrees_of_freedom = as.numeric(moderated_fit$df.total),
+    treated_observed = observation_summary$treated_observed[
+      match(rownames(filtered_matrix), observation_summary$protein_id)
+    ],
+    control_observed = observation_summary$control_observed[
+      match(rownames(filtered_matrix), observation_summary$protein_id)
+    ],
+    observation_rate = observation_summary$observation_rate[
+      match(rownames(filtered_matrix), observation_summary$protein_id)
+    ],
+    estimation_source = "sample-level moderated model"
+  )
+}
+
+sample_level_effects <- map_dfr(
+  full_data,
+  estimate_within_dataset_effects,
+  minimum_group_count = default_minimum_group_count,
+  minimum_observation_rate = default_minimum_observation_rate
+)
+
+summary_level_effects <- bind_rows(summary_only) |>
+  transmute(
+    protein_id = protein_id,
+    dataset_id = dataset_id,
+    estimated_log_effect = as.numeric(log_fold_change),
+    standard_error = as.numeric(standard_error),
+    degrees_of_freedom = pmax(as.numeric(treated_count) + as.numeric(control_count) - 2, 1),
+    treated_observed = as.numeric(treated_count),
+    control_observed = as.numeric(control_count),
+    observation_rate = NA_real_,
+    estimation_source = "summary-level input"
+  )
+
+per_dataset_effects <- bind_rows(sample_level_effects, summary_level_effects) |>
+  filter(
+    !is.na(estimated_log_effect),
+    !is.na(standard_error),
+    is.finite(estimated_log_effect),
+    is.finite(standard_error),
+    standard_error > 0,
+    !is.na(degrees_of_freedom),
+    degrees_of_freedom > 0
+  ) |>
+  mutate(extreme_se_flag = flag_extreme_standard_errors(standard_error))
+
+meta_analysis_results <- split(per_dataset_effects, per_dataset_effects$protein_id) |>
+  map_dfr(
+    run_feature_meta_analysis,
+    id_col = "protein_id",
+    effect_col = "estimated_log_effect",
+    se_col = "standard_error",
+    minimum_datasets = default_minimum_datasets_for_meta,
+    pooled_name = "pooled_log_effect"
+  ) |>
+  append_fdr() |>
+  arrange(false_discovery_rate)
+
+top_protein_id <- meta_analysis_results$protein_id[[1]]
+
+leave_one_out_results <- run_leave_one_out_meta(
+  feature_id = top_protein_id,
+  dataset_effects = per_dataset_effects,
+  id_col = "protein_id",
+  effect_col = "estimated_log_effect",
+  se_col = "standard_error",
+  minimum_datasets = default_minimum_datasets_for_meta,
+  pooled_name = "pooled_log_effect"
+)
+
+top_meta_table <- meta_analysis_results |>
+  slice_head(n = 5) |>
+  transmute(
+    Protein = protein_id,
+    Datasets = dataset_count,
+    `Pooled log-effect` = pooled_log_effect,
+    `95% CI` = sprintf("[%.3f, %.3f]", confidence_interval_lower, confidence_interval_upper),
+    `Meta p-value` = pooled_p_value,
+    FDR = false_discovery_rate,
+    `Tau-squared` = tau_squared,
+    `I-squared (%)` = I_squared,
+    `Direction agreement` = weighted_direction_agreement,
+    `Flagged SEs` = flagged_se_count,
+    Heterogeneity = heterogeneity_level
+  )
+
+loo_summary_table <- leave_one_out_results |>
+  transmute(
+    Protein = protein_id,
+    `Omitted dataset` = omitted_dataset_id,
+    `Pooled log-effect` = pooled_log_effect,
+    `95% CI` = sprintf("[%.3f, %.3f]", confidence_interval_lower, confidence_interval_upper),
+    `Meta p-value` = pooled_p_value,
+    `Tau-squared` = tau_squared,
+    `I-squared (%)` = I_squared
+  )
+
+effect_heterogeneity_plot <- build_heterogeneity_scatter(
+  data = meta_analysis_results,
+  effect_col = "pooled_log_effect",
+  x_label = "Pooled effect on the analysed log scale",
+  title = "Cross-dataset reproducibility of treatment effects",
+  subtitle = expression("Pooled log-effect against between-study heterogeneity (" * I^2 * ")")
+)
+
+effect_forest_data <- build_forest_plot_data(
+  dataset_results = per_dataset_effects,
+  pooled_results = meta_analysis_results,
+  feature_id = top_protein_id,
+  feature_col = "protein_id",
+  estimate_col = "estimated_log_effect",
+  pooled_estimate_col = "pooled_log_effect"
+)
+
+effect_forest_plot <- build_forest_plot(
+  forest_plot_data = effect_forest_data,
+  title = paste("Forest plot -", top_protein_id),
+  subtitle = "Dataset-specific and pooled random-effects estimates",
+  x_label = "Effect on the analysed log scale"
+)
+```
+
+The five proteins shown in @tbl-top-meta have extremely small false discovery rates at the displayed precision and perfect weighted directional agreement, making them the strongest cross-study treatment signals in the collection. They divide naturally into two heterogeneity profiles.
+
+protein_0014, protein_0289, and protein_0243 show $\tau^2 = 0.000$ and $I^2 \approx 0\%$, indicating no detected between-study heterogeneity and close concordance of the study-specific estimates in both direction and magnitude. Their pooled effects of $-1.893$, $-0.789$, and $0.712$ are therefore best interpreted as stable cross-study effects rather than averages over discordant study-specific signals.
+
+protein_0169 and protein_0362 remain within the low-heterogeneity band but lie closer to its upper boundary, with $\tau^2 = 0.005$, $I^2 = 18.2\%$ and $\tau^2 = 0.004$, $I^2 = 18.1\%$, respectively. Their confidence intervals of $[1.511, 1.756]$ and $[-1.178, -0.961]$ are correspondingly wider, although both effects remain clearly non-zero and directionally consistent.
+
+Two proteins also carry flagged standard errors, namely protein_0014 and protein_0362, indicating that at least one dataset contributed an outlying uncertainty estimate in each case. Given the consistency across the remaining datasets, this does not alter their pooled conclusions, but the corresponding dataset-level fits should be inspected before either protein is prioritised for follow-up.
+
+```{r}
+#| label: tbl-top-meta
+#| echo: false
+render_output_table(
+  top_meta_table,
+  caption = "Top proteins from cross-dataset random-effects meta-analysis",
+  digits = 3
+)
+```
+
+@fig-meta-summary places these leading proteins in the context of all analysed proteins. Most proteins cluster near zero pooled effect and form a dense central mass with generally low heterogeneity. The five proteins highlighted in @tbl-top-meta separate clearly from this background, with protein_0014 occupying the most extreme negative position. The plot therefore shows that large pooled effects are relatively uncommon in the collection and that the strongest cross-study signals are distinguished not only by statistical support but also by clear visual separation from the bulk of near-zero effects.
+
+```{r}
+#| label: fig-meta-summary
+#| fig-cap: "Pooled effect against between-study heterogeneity in the simulated cross-dataset analysis."
+#| echo: false
+effect_heterogeneity_plot
+```
+
+protein_0014 was examined further using leave-one-dataset-out refitting. @tbl-loo shows that the pooled estimate ranges narrowly from $-1.873$ to $-1.920$ across all omissions, a spread of only $0.047$ log units, with heterogeneity remaining effectively zero throughout. No single dataset is therefore responsible for either the magnitude or the stability of this result. @fig-forestplot shows the same stability visually. All dataset-specific estimates are negative and their intervals overlap closely. The pooled estimate sits centrally and has the narrowest interval, which is consistent with efficient aggregation across concordant studies.
+
+```{r}
+#| label: tbl-loo
+#| echo: false
+render_output_table(
+  loo_summary_table,
+  caption = "Leave-one-dataset-out sensitivity for the top protein",
+  digits = 3
+)
+```
+
+```{r}
+#| label: fig-forestplot
+#| fig-cap: "Dataset-specific and pooled random-effects estimates for protein_0014."
+#| echo: false
+effect_forest_plot
+```
+:::
+
+------------------------------------------------------------------------
+
+### Framework 2: Cross-Dataset Variability and Dispersion Modelling
+
+Mean differences do not capture every biologically relevant response to treatment. A protein may show little change in average abundance while becoming more variable across individuals. This can reflect heterogeneous subgroup responses or treatment effects that differ in strength across samples. This framework asks whether treatment changes within-condition spread and whether that dispersion change is supported across studies. [@dispersion-ratio]
+
+Within each dataset $d$, let $\sigma_{i,1,d}^2$ and $\sigma_{i,0,d}^2$ denote the treatment and control variances for protein $i$. These are estimated from sample-level measurements after appropriate adjustment for technical structure. The study-level effect is the log variance ratio, $$\lambda_{i,d} = \log\left(\frac{\sigma_{i,1,d}^2}{\sigma_{i,0,d}^2}\right),$$
+
+A value of zero indicates no dispersion change. A positive value means the protein is more variable under treatment, while a negative value means it is less variable under treatment. The log scale is useful because increases and decreases in variance are represented symmetrically around zero. It also gives a study-level estimate that is more suitable for cross-dataset synthesis.
+
+Dispersion modelling assumes that within-group variances are estimable with sufficient stability to support comparison across studies. That condition is stronger than in mean modelling because variance estimates are more sensitive to limited sample size and to extreme observations. The log variance ratio is also treated as the appropriate effect scale, which implies that relative changes in spread are the quantity of interest rather than absolute differences in variance. More fundamentally, the framework assumes that treatment-related heterogeneity is scientifically meaningful at the protein level and not merely a by-product of random sampling fluctuation within small groups.
+
+::: callout-note
+Under the synthesis framework described in @sec-method-preamble, the study-level quantity for protein $i$ in dataset $d$ is $$\hat{\theta}_{i,d} = \hat{\lambda}_{i,d}.$$ The corresponding cross-study target is the average log variance ratio, $$\lambda_i = \mathbb{E}_d(\lambda_{i,d}),$$
+:::
+
+Dispersion differences in each dataset can also be assessed using the Brown–Forsythe test. This test is based on absolute deviations from the group median, [@brown-forsythe] $$Z_{i,s,d} = |Y_{i,s,d} - \tilde{Y}_{i,g,d}|, $$ where $Y_{i,s,d}$ is the processed log-abundance of protein $i$ in sample $s$, and $\tilde{Y}_{i,g,d}$ is the median log-abundance of protein $i$ in group $g$ within dataset $d$. This formulation is less sensitive to outliers than classical variance tests because it uses deviations from the median rather than deviations from the mean. It provides a robust study-level test of unequal spread, while the log variance ratio provides the effect size used for synthesis.
+
+The approximate standard error of the estimated log variance ratio is $$\hat{\sigma}_{\lambda_{i,d}} = \sqrt{\frac{2}{n_{i,1,d}-1}+ \frac{2}{n_{i,0,d}-1}}$$ where $n_{i,1,d}$ and $n_{i,0,d}$ are the observed treatment and control sample counts for protein $i$ in dataset $d$. The pair $(\hat{\lambda}_{i,d}, \hat{\sigma}_{\lambda_{i,d}})$ is then passed to the cross-dataset synthesis model.
+
+The synthesis stage returns the pooled log variance ratio $\hat{\lambda}_i^{\mathrm{RE}}$, the exponentiated ratio $\exp(\hat{\lambda}_i^{\mathrm{RE}})$, its confidence interval, the meta-analytic p-value, the FDR-adjusted p-value and heterogeneity summaries. The exponentiated ratio is the most direct reporting scale. For example, a value above one indicates greater treatment variability, while a value below one indicates reduced treatment variability.
+
+Where sample-level data are available, the platform can also classify proteins by their mean-shift and dispersion-shift patterns. This distinction is important because a protein with stable average abundance but increased variability may still be biologically relevant. Conversely, a strong mean shift with no dispersion change suggests a more uniform treatment response.
+
+This framework requires sample-level measurement matrices. It cannot be reconstructed reliably from stored log fold-changes or p-values because those summaries do not preserve within-group spread. Dispersion estimates are also noisier than mean estimates at the same sample size, so each contributing dataset should meet a minimum per-group observation threshold before it enters synthesis.
+
+:::{.caution-note}
+Dispersion analysis is more demanding than mean-based effect estimation because variance estimates become unstable when group sizes are small. Robust procedures such as Brown-Forsythe testing reduce sensitivity to outliers, but they do not remove the need for adequate per-group observations. Apparent treatment-related variability may also arise through batch structure, differential missingness, preprocessing artefacts, or a small number of unusual samples. For this reason, dispersion findings should be treated as evidence of altered spread only when they remain stable across datasets and survive multiplicity correction.
+:::
+
+::: feature-panel
+#### Research Case Example 2
+
+**Query**: <i>"Which proteins show reproducible cross-study evidence of altered variability under treatment?"</i>
+
+In this simulated collection, batch-adjusted log-abundances are used to compute $\hat{\lambda}_{i,d}$ and $\hat{\sigma}_{\lambda_{i,d}}$ within each of the $5$ sample-level datasets. Datasets contributing only summary-level inputs are excluded from this analysis and flagged in the output.
+
+**Analysis and Returned Outputs**
+
+```{r}
+# Within-dataset dispersion estimation 
+estimate_within_dataset_dispersion <- function(dataset,
+                                               minimum_group_count = default_minimum_group_count,
+                                               minimum_observation_rate = default_minimum_observation_rate) {
+  metadata <- prepare_dataset_metadata(dataset)
+  abundance_matrix <- dataset$protein_abundance
+
+  observation_summary <- summarise_protein_observations(abundance_matrix, metadata)
+  retained_proteins <- filter_retained_proteins(
+    observation_summary,
+    minimum_group_count = minimum_group_count,
+    minimum_observation_rate = minimum_observation_rate
+  )
+
+  if (length(retained_proteins) == 0) {
+    return(tibble())
+  }
+
+  adjusted_matrix <- abundance_matrix[retained_proteins, , drop = FALSE]
+  adjusted_matrix <- t(apply(adjusted_matrix, 1, batch_adjust_vector, batch_values = metadata$batch))
+  rownames(adjusted_matrix) <- retained_proteins
+
+  map_dfr(retained_proteins, function(protein_id) {
+    analysis_data <- tibble(
+      abundance = adjusted_matrix[protein_id, ],
+      condition = metadata$condition
+    ) |>
+      drop_na()
+
+    treated_values <- analysis_data$abundance[analysis_data$condition == "treated"]
+    control_values <- analysis_data$abundance[analysis_data$condition == "control"]
+
+    if (length(treated_values) < minimum_group_count || length(control_values) < minimum_group_count) {
+      return(tibble())
+    }
+
+    treated_variance <- var(treated_values)
+    control_variance <- var(control_values)
+
+    if (!is.finite(treated_variance) || !is.finite(control_variance) ||
+        treated_variance <= 0 || control_variance <= 0) {
+      return(tibble())
+    }
+
+    brown_forsythe_fit <- tryCatch(
+      leveneTest(abundance ~ condition, data = analysis_data, center = median),
+      error = function(error_condition) NULL
+    )
+
+    if (is.null(brown_forsythe_fit)) {
+      return(tibble())
+    }
+
+    log_variance_ratio <- log(treated_variance / control_variance)
+    standard_error <- sqrt(
+      2 / (length(treated_values) - 1) +
+        2 / (length(control_values) - 1)
+    )
+
+    tibble(
+      protein_id = protein_id,
+      dataset_id = dataset$dataset_id,
+      log_variance_ratio = log_variance_ratio,
+      standard_error = standard_error,
+      treated_variance = treated_variance,
+      control_variance = control_variance,
+      variance_ratio = treated_variance / control_variance,
+      treated_observed = length(treated_values),
+      control_observed = length(control_values),
+      brown_forsythe_p_value = brown_forsythe_fit$`Pr(>F)`[[1]],
+      estimation_source = "sample-level Brown-Forsythe"
+    )
+  })
+}
+
+per_dataset_dispersion <- map_dfr(
+  full_data,
+  estimate_within_dataset_dispersion,
+  minimum_group_count = default_minimum_group_count,
+  minimum_observation_rate = default_minimum_observation_rate
+) |>
+  filter(
+    !is.na(log_variance_ratio),
+    !is.na(standard_error),
+    is.finite(log_variance_ratio),
+    is.finite(standard_error),
+    standard_error > 0
+  ) |>
+  mutate(extreme_se_flag = flag_extreme_standard_errors(standard_error))
+
+dispersion_meta_results <- split(per_dataset_dispersion, per_dataset_dispersion$protein_id) |>
+  map_dfr(
+    run_feature_meta_analysis,
+    id_col = "protein_id",
+    effect_col = "log_variance_ratio",
+    se_col = "standard_error",
+    minimum_datasets = default_minimum_datasets_for_meta,
+    pooled_name = "pooled_log_variance_ratio"
+  ) |>
+  mutate(
+    pooled_variance_ratio = exp(pooled_log_variance_ratio),
+    ci_lower_variance_ratio = exp(confidence_interval_lower),
+    ci_upper_variance_ratio = exp(confidence_interval_upper)
+  ) |>
+  append_fdr() |>
+  arrange(false_discovery_rate)
+
+joint_classification <- meta_analysis_results |>
+  transmute(
+    protein_id = protein_id,
+    significant_mean_shift = false_discovery_rate < 0.05
+  ) |>
+  full_join(
+    dispersion_meta_results |>
+      transmute(
+        protein_id = protein_id,
+        significant_dispersion_shift = false_discovery_rate < 0.05
+      ),
+    by = "protein_id"
+  ) |>
+  mutate(
+    across(starts_with("significant"), ~ replace_na(.x, FALSE)),
+    joint_pattern = case_when(
+      significant_mean_shift & significant_dispersion_shift ~ "mean and dispersion shift",
+      significant_mean_shift & !significant_dispersion_shift ~ "mean shift only",
+      !significant_mean_shift & significant_dispersion_shift ~ "dispersion shift only",
+      TRUE ~ "no significant shift"
+    )
+  )
+
+joint_pattern_counts <- joint_classification |>
+  count(joint_pattern, name = "protein_count") |>
+  arrange(desc(protein_count))
+
+top_dispersion_table <- dispersion_meta_results |>
+  slice_head(n = 5) |>
+  transmute(
+    Protein = protein_id,
+    Datasets = dataset_count,
+    `Pooled log VR` = pooled_log_variance_ratio,
+    `Pooled VR` = pooled_variance_ratio,
+    `95% CI (VR scale)` = sprintf("[%.3f, %.3f]", ci_lower_variance_ratio, ci_upper_variance_ratio),
+    `Meta p-value` = pooled_p_value,
+    FDR = false_discovery_rate,
+    `Tau-squared` = tau_squared,
+    `I-squared (%)` = I_squared,
+    Heterogeneity = heterogeneity_level
+  )
+
+joint_pattern_table <- joint_pattern_counts |>
+  transmute(
+    `Joint pattern` = joint_pattern,
+    Count = protein_count
+  )
+
+dispersion_volcano_plot <- dispersion_meta_results |>
+  mutate(significance_label = if_else(false_discovery_rate < 0.05, "Significant", "Not significant")) |>
+  ggplot(aes(x = pooled_log_variance_ratio, y = -log10(pooled_p_value), colour = significance_label)) +
+  geom_point(size = 2.2, alpha = 0.82) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "#7f8f8b", linewidth = 0.5) +
+  scale_colour_manual(values = c(
+    "Not significant" = effect_palette[["neutral"]],
+    "Significant" = effect_palette[["accent"]]
+  )) +
+  labs(
+    title = "Differential variability across proteins",
+    subtitle = "Pooled log variance ratio against meta-analytic significance",
+    x = "Pooled log variance ratio: log(treated / control)",
+    y = expression(-log[10](p)),
+    colour = NULL
+  ) +
+  platform_theme()
+
+joint_pattern_plot <- build_joint_count_plot(
+  data = joint_pattern_counts,
+  category_col = "joint_pattern",
+  count_col = "protein_count",
+  fill_values = c(
+    "mean and dispersion shift" = effect_palette[["accent"]],
+    "mean shift only" = effect_palette[["contrast"]],
+    "dispersion shift only" = "#557f9b",
+    "no significant shift" = effect_palette[["neutral"]]
+  ),
+  title = "Joint mean-shift and dispersion-shift classification",
+  subtitle = "Proteins cross-classified across both frameworks"
+)
+```
+
+No proteins reach FDR significance in this analysis. @tbl-dispersion shows the top-ranked candidates by meta-analytic p-value, and while some carry pooled variance ratios meaningfully different from 1 (largest being protein_0087 at $1.838$ and protein_0089 at $0.649$), every protein carries an FDR of $0.877$ or higher. The individual signals exist but are not strong enough to survive the multiple-testing correction applied across the full proteome.
+
+```{r}
+#| label: tbl-dispersion 
+#| echo: false
+render_output_table(
+  top_dispersion_table,
+  caption = "Top proteins from cross-dataset dispersion meta-analysis",
+  digits = 3
+)
+```
+
+@fig-dispersion-volcano reflects this collectively. Pooled log variance ratios spread broadly and approximately symmetrically around zero, indicating that increases and decreases in treatment-related variability occur with similar frequency and that no directional enrichment is detectable at the proteome level. The candidates from @tbl-dispersion appear toward the outer edges of this distribution, where estimated variance ratios are furthest from $1$ and nominal p-values are smallest, yet every point remains the same colour (none are FDR-significant).
+
+```{r}
+#| label: fig-dispersion-volcano
+#| fig-cap: "Pooled log variance ratio against meta-analytic significance."
+#| echo: false
+dispersion_volcano_plot
+```
+
+Considered alongside the effect-estimation results, @tbl-joint-variability shows that the reproducible treatment signal in this simulated collection is carried entirely by mean shifts. Of the $400$ proteins, $380$ show no significant shift under either framework, while the remaining $20$ are classified as mean-shift only. No protein is identified as dispersion-shift only or as showing both patterns, confirming that altered variability does not contribute an additional layer of cross-dataset signal beyond what differential abundance already captured.
+
+```{r}
+#| label: tbl-joint-variability
+#| echo: false
+render_output_table(
+  joint_pattern_table,
+  caption = "Joint classification of mean and dispersion shifts",
+  digits = 3
+)
+```
+:::
+
+------------------------------------------------------------------------
+
+### Framework 3: Cross-Dataset Association and Co-expression Analysis
+
+Effect estimation and variability modelling treat proteins as separate units. Association and co-expression analysis instead asks whether the relationship between two proteins is itself reproducible across datasets. This is relevant when the biological question concerns coordinated regulation or signalling dependence rather than the behaviour of each protein in isolation.
+
+Within each dataset $d$, the association between proteins $i$ and $j$ is estimated using a partial correlation coefficient $\hat{\rho}_{ij,d}$. Batch and condition are adjusted for before the correlation is calculated, so the association reflects residual co-expression rather than shared technical variation or treatment-driven mean shifts. This is important because two proteins may appear correlated simply because both are affected by the same batch or both have higher average abundance in the treated group.
+
+The estimated partial correlation is transformed using Fisher’s transformation, [@fisher-z] $$\hat{z}_{ij,d} = \frac{1}{2} \log\left(\frac{1+\hat{\rho}_{ij,d}}{1-\hat{\rho}_{ij,d}}\right)$$ This maps correlations from $(-1,1)$ to the real line and gives a quantity with more stable sampling behaviour. Its approximate standard error is
+
+$$\hat{\sigma}_{z_{ij,d}} = \frac{1}{\sqrt{n_{ij,d} - k_d -3}}$$ where $n_{ij,d}$ is the pair-specific number of complete observations available for proteins $i$ and $j$ in dataset $d$, and $k_d$ is the number of conditioning covariates removed before correlation estimation. This approximation requires enough residual degrees of freedom after adjustment.
+
+The association framework assumes that residual dependence between two proteins can be represented adequately by a partial correlation after adjustment for the modelled covariates. This means the remaining relationship is treated as approximately linear on the working scale and sufficiently well behaved for Fisher’s transformation to provide a useful normal approximation. The method also assumes that pair-specific effective sample sizes are large enough for the estimated uncertainty to be informative. In this setting, a pooled association is interpreted as reproducible conditional dependence across studies rather than as direct mechanistic interaction.
+
+::: callout-note
+Under the synthesis framework described in @sec-method-preamble, the study-level quantity for protein $i$ in dataset $d$ is $$\hat{\theta}_{ij,d} = \hat{z}_{ij,d}.$$ The corresponding cross-study target is the average Fisher-transformed partial correlation, $$z_{ij} = \mathbb{E}_d(z_{ij,d}),$$
+:::
+
+The random-effects synthesis is performed on the Fisher scale, producing the pooled estimate $\hat{z}_{ij}^{\mathrm{RE}}$. This estimate is then back-transformed to the correlation scale $$\hat{\rho}_{ij}^{\mathrm{RE}} = \frac{\exp\left(2\hat{z}_{ij}^{\mathrm{RE}}\right) - 1}{\exp\left(2\hat{z}_{ij}^{\mathrm{RE}}\right) + 1}$$ The back-transformed value $\hat{\rho}_{ij}^{\mathrm{RE}}$ is the most interpretable reporting quantity because it is expressed as a pooled partial correlation. The platform should report this estimate with its back-transformed confidence interval, meta-analytic p-value, FDR-adjusted p-value, and heterogeneity summaries.
+
+Multiple testing is especially important in this framework because the number of protein pairs grows rapidly as the number of proteins increases. A reproducibility classification is therefore useful. Pairs with a consistent sign and low heterogeneity are stronger candidates for cross-study co-expression structure, while sign-inconsistent pairs should be interpreted cautiously because their association is not stable across datasets.
+
+The Fisher approximation depends on adequate per-dataset sample size. When $n_d$ is small, or when many covariates are used in the partial correlation, the standard error may be unstable. The platform should therefore check the number of usable observations before synthesis. This analysis also requires sample-level measurement matrices, because partial correlations cannot be recovered reliably from stored protein-level summary statistics.
+
+:::{.caution-note}
+The association framework estimates reproducible conditional dependence rather than direct biological interaction. A partial correlation may reflect shared regulation, unmeasured confounding, residual batch structure, or correlated missingness. It also depends on enough complete paired observations after adjustment, so missingness can reduce the effective sample size differently for different protein pairs. Candidate associations should therefore be interpreted as stable co-expression patterns that require follow-up rather than as evidence of causality or directionality.
+:::
+
+::: feature-panel
+#### Research Case Example 3
+
+**Query**: <i>"Which protein associations are reproducible across studies, and which appear dataset-specific?"</i>
+
+In this simulated collection, partial correlations are estimated within each of the 5 sample-level datasets after residualising log-abundances against batch and condition. Synthesis is restricted to pairs where at least one constituent protein shows evidence of treatment relevance from the effect-estimation framework, and a minimum absolute correlation of $0.20$ is required in at least one dataset before a pair enters synthesis. FDR correction is applied across all pairs meeting these criteria and the minimum dataset threshold.
+
+**Analysis and Returned Outputs**
+
+```{r}
+# Within-dataset partial correlation estimation 
+
+estimate_within_dataset_associations <- function(dataset,
+                                                 minimum_observation_rate = default_minimum_observation_rate,
+                                                 minimum_group_count = default_minimum_group_count) {
+  metadata <- prepare_dataset_metadata(dataset)
+  abundance_matrix <- dataset$protein_abundance
+
+  observation_summary <- tibble(
+    protein_id = rownames(abundance_matrix),
+    total_observed = rowSums(!is.na(abundance_matrix)),
+    observation_rate = rowSums(!is.na(abundance_matrix)) / ncol(abundance_matrix)
+  ) |>
+    mutate(passes_filter = observation_rate >= minimum_observation_rate)
+
+  retained_proteins <- observation_summary |>
+    filter(passes_filter) |>
+    pull(protein_id)
+
+  if (length(retained_proteins) < 2) {
+    return(tibble())
+  }
+
+  filtered_matrix <- abundance_matrix[retained_proteins, , drop = FALSE]
+
+  residualise_protein <- function(abundance_values) {
+    analysis_data <- tibble(
+      abundance = abundance_values,
+      condition = metadata$condition,
+      batch = metadata$batch
+    ) |>
+      drop_na()
+
+    if (nrow(analysis_data) < 6) {
+      return(rep(NA_real_, length(abundance_values)))
+    }
+
+    regression_formula <- if (n_distinct(analysis_data$batch) > 1) {
+      abundance ~ condition + batch
+    } else {
+      abundance ~ condition
+    }
+
+    residual_values <- rep(NA_real_, length(abundance_values))
+    residual_values[!is.na(abundance_values)] <- residuals(lm(regression_formula, data = analysis_data))
+    residual_values
+  }
+
+  residual_matrix <- t(apply(filtered_matrix, 1, residualise_protein))
+  rownames(residual_matrix) <- retained_proteins
+
+  sufficient_observations <- rowSums(!is.na(residual_matrix)) >= (minimum_group_count * 2)
+  residual_matrix <- residual_matrix[sufficient_observations, , drop = FALSE]
+
+  if (nrow(residual_matrix) < 2) {
+    return(tibble())
+  }
+
+  k_covariates <- if (n_distinct(metadata$batch) > 1) 2L else 1L
+  correlation_matrix <- cor(t(residual_matrix), use = "pairwise.complete.obs")
+  pairwise_sample_counts <- tcrossprod(!is.na(residual_matrix))
+
+  upper_index <- which(upper.tri(correlation_matrix), arr.ind = TRUE)
+  protein_names <- rownames(residual_matrix)
+  sample_rho <- correlation_matrix[upper_index]
+  pairwise_counts <- pairwise_sample_counts[upper_index]
+  effective_df <- pairwise_counts - k_covariates - 3
+
+  valid_index <- is.finite(sample_rho) & is.finite(effective_df) & effective_df > 0
+  upper_index <- upper_index[valid_index, , drop = FALSE]
+  sample_rho <- sample_rho[valid_index]
+  pairwise_counts <- pairwise_counts[valid_index]
+  effective_df <- effective_df[valid_index]
+
+  if (length(sample_rho) == 0) {
+    return(tibble())
+  }
+
+  rho_clamped <- pmax(pmin(sample_rho, 0.9999), -0.9999)
+  fisher_z <- 0.5 * log((1 + rho_clamped) / (1 - rho_clamped))
+  standard_error <- 1 / sqrt(effective_df)
+
+  tibble(
+    protein_1 = protein_names[upper_index[, 1]],
+    protein_2 = protein_names[upper_index[, 2]],
+    dataset_id = dataset$dataset_id,
+    sample_rho = sample_rho,
+    fisher_z = fisher_z,
+    standard_error = standard_error,
+    pairwise_sample_count = pairwise_counts,
+    effective_df = effective_df,
+    estimation_source = "sample-level partial correlation"
+  )
+}
+
+per_dataset_associations <- map_dfr(
+  full_data,
+  estimate_within_dataset_associations,
+  minimum_observation_rate = default_minimum_observation_rate,
+  minimum_group_count = default_minimum_group_count
+) |>
+  filter(
+    !is.na(fisher_z),
+    !is.na(standard_error),
+    is.finite(fisher_z),
+    is.finite(standard_error),
+    standard_error > 0
+  ) |>
+  mutate(
+    pair_id = paste(pmin(protein_1, protein_2), pmax(protein_1, protein_2), sep = "--"),
+    extreme_se_flag = flag_extreme_standard_errors(standard_error)
+  )
+
+treatment_relevant_proteins <- meta_analysis_results |>
+  filter(false_discovery_rate < 0.05) |>
+  pull(protein_id)
+
+if (length(treatment_relevant_proteins) == 0) {
+  treatment_relevant_proteins <- meta_analysis_results |>
+    slice_head(n = 50) |>
+    pull(protein_id)
+}
+
+per_dataset_associations_filtered <- per_dataset_associations |>
+  filter(
+    protein_1 %in% treatment_relevant_proteins |
+      protein_2 %in% treatment_relevant_proteins
+  ) |>
+  group_by(pair_id) |>
+  filter(any(abs(sample_rho) >= 0.20)) |>
+  ungroup()
+
+association_meta_results <- split(per_dataset_associations_filtered, per_dataset_associations_filtered$pair_id) |>
+  map_dfr(
+    run_feature_meta_analysis,
+    id_col = "pair_id",
+    effect_col = "fisher_z",
+    se_col = "standard_error",
+    minimum_datasets = default_minimum_datasets_for_meta,
+    pooled_name = "pooled_fisher_z"
+  ) |>
+  mutate(
+    pooled_rho = (exp(2 * pooled_fisher_z) - 1) / (exp(2 * pooled_fisher_z) + 1),
+    ci_lower_rho = (exp(2 * confidence_interval_lower) - 1) / (exp(2 * confidence_interval_lower) + 1),
+    ci_upper_rho = (exp(2 * confidence_interval_upper) - 1) / (exp(2 * confidence_interval_upper) + 1)
+  ) |>
+  append_fdr() |>
+  mutate(
+    direction_consistency = case_when(
+      weighted_direction_agreement >= 0.80 & pooled_rho > 0 ~ "consistently positive",
+      weighted_direction_agreement >= 0.80 & pooled_rho < 0 ~ "consistently negative",
+      TRUE ~ "sign inconsistent"
+    )
+  ) |>
+  arrange(false_discovery_rate)
+
+top_association_table <- association_meta_results |>
+  slice_head(n = 8) |>
+  separate(pair_id, into = c("Protein A", "Protein B"), sep = "--") |>
+  transmute(
+    `Protein A`,
+    `Protein B`,
+    Datasets = dataset_count,
+    `Pooled rho` = pooled_rho,
+    `95% CI (rho scale)` = sprintf("[%.3f, %.3f]", ci_lower_rho, ci_upper_rho),
+    `Meta p-value` = pooled_p_value,
+    FDR = false_discovery_rate,
+    `Tau-squared` = tau_squared,
+    `I-squared (%)` = I_squared,
+    Consistency = direction_consistency
+  )
+
+top_association_plot_data <- association_meta_results |>
+  slice_head(n = 8) |>
+  mutate(pair_label = stringr::str_replace(pair_id, "--", " - "))
+
+top_association_dot_plot <- build_interval_dot_plot(
+  data = top_association_plot_data,
+  label_col = "pair_label",
+  estimate_col = "pooled_rho",
+  lower_col = "ci_lower_rho",
+  upper_col = "ci_upper_rho",
+  colour_col = "direction_consistency",
+  colour_values = direction_consistency_palette,
+  title = "Top reproducible protein associations",
+  subtitle = "Pooled partial correlations with 95% confidence intervals",
+  x_label = "Pooled partial correlation"
+)
+```
+
+@tbl-association lists the top-ranked protein pairs by meta-analytic p-value. All eight were estimable across all $5$ sample-level datasets and every pair shows $\tau^2=0$ and $I^2=0\%$, meaning the partial correlation was not only consistent in sign but stable in magnitude across studies. @fig-association-plot shows this visually, where every confidence interval sits entirely on one side of zero and intervals are narrow relative to the pooled estimates.
+
+The pooled partial correlations are relatively small in magnitude, ranging from $-0.238$ to $0.251$. The strongest positive association is between protein_0014 and protein_0282 at $\hat{\rho}=0.251$ and the strongest negative is the protein_0123-protein_0374 pair at $\hat{\rho}=-0.238$. protein_0289 appears in two separate pairs (protein_0249 and protein_0397), both consistently negative. This suggests a locally connected position in the co-expression structure, though this cannot be confirmed from these results alone.
+
+Despite the sign consistency and near-zero heterogeneity, none of the pairs pass the FDR correction, each carrying an adjusted value of $0.607$. This is a direct consequence of the testing family size rather than weakness in individual signals. The quadratic growth in protein pairs means the Benjamini-Hochberg correction absorbs p-values that would otherwise appear informative. These pairs are best treated as the most stable candidates from the present analysis, suitable for targeted follow-up under a reduced testing space or stronger prior filtering, not confirmed reproducible associations.
+
+```{r}
+#| label: tbl-association
+#| echo: false
+render_output_table(
+  top_association_table, 
+  caption = "Top nominal protein associations from cross-dataset synthesis",
+  digits = 3
+)
+```
+
+```{r}
+#| label: fig-association-plot
+#| fig-cap: "Pooled partial correlations with 95% confidence intervals for the top-ranked protein pairs."
+#| echo: false
+top_association_dot_plot
+```
+:::
+
+------------------------------------------------------------------------
+
+### Framework 4: Cross-Dataset Higher-Order Structure and Preservation
+
+Higher-order structure and preservation analysis shifts the unit of inference from individual proteins or protein pairs to coordinated protein groups such as pathways and modules. This is relevant when the research question concerns system-level organisation. Individual proteins may show noisy or inconsistent signals, while the group they belong to may still show a coherent treatment response or preserved internal structure across studies. [@higher-order]
+
+Let $\mathcal{P}_m$ denote the set of proteins in pathway or module $m$. Within each dataset $d$, the activity of this group is summarised through a module eigengene, defined as the first principal component score of the sample-by-protein matrix restricted to proteins in $\mathcal{P}_m$. [@eigengene] If $\mathbf{X}_{m,d}$ is the $n_d \times |\mathcal{P}_m|$ matrix of batch-adjusted, standardised log-abundances for module $m$, then the eigengene can be written as $$\mathbf{e}_{m,d} = \mathbf{X}_{m,d}\mathbf{v}_{1,m,d},$$ where $\mathbf{v}_{1,m,d}$ is the first loading vector. The resulting vector $\mathbf{e}_{m,d}$ contains one eigengene value per sample and represents the dominant coordinated abundance pattern in the module.
+
+The treatment association of this module is then estimated by regressing the eigengene on the treatment indicator while adjusting for batch or other available design covariates: $$e_{m,s,d} = \alpha_{m,d} + \delta_{m,d}X_{s,d} + \mathbf{c}_{s,d}^\top\mathbf{\eta}_{m,d} + \varepsilon_{m,s,d}$$ Here, $e_{m,s,d}$ is the eigengene value for sample $s$, $X_{s,d}$ is the treatment indicator, and $\mathbf{c}_{s,d}$ contains adjustment covariates. The coefficient $\delta_{m,d}$ is the study-level module treatment effect and measures whether the coordinated module activity differs between treatment and control within dataset $d$. Higher-order modelling assumes that a pathway or module can be summarised meaningfully by a dominant low-dimensional signal, here represented by the first principal component. That assumption is strongest when the proteins within the set reflect one main coordinated pattern rather than several competing structures. The framework also assumes that sign alignment produces a biologically consistent orientation across studies, so that the pooled module effect is not driven by arbitrary reversals of the eigengene axis. More broadly, it treats the observed module as a stable inferential unit whose collective behaviour is more informative than any single constituent protein considered in isolation.
+
+::: callout-note
+Under the synthesis framework described in @sec-method-preamble, the study-level quantity for module $m$ in dataset $d$ is $$\hat{\theta}_{m,d} = \hat{\delta}_{m,d}.$$ The corresponding cross-study target is the average module treatment effect across studies $$\delta_m = \mathbb{E}_d(\delta_{m,d}),$$
+:::
+
+A practical issue is eigengene sign ambiguity. The first principal component is defined only up to a sign flip, so the same module can appear with opposite orientation across datasets even when the underlying pattern is similar. Before synthesis, eigengenes are therefore aligned to the average protein-level treatment direction within the module, $$S_m = \frac{1}{|\mathcal{P}_m|}\sum_{i \in \mathcal{P}_m}\hat{\beta}_{i}^{\mathrm{RE}},$$ where $\hat{\beta}_{i}^{\mathrm{RE}}$ is the pooled protein-level treatment effect from the effect-estimation framework. If the correlation between the eigengene and treatment indicator has the opposite sign to $S_m$, the eigengene is multiplied by $-1$ before module-level regression.
+
+A separate question is whether the module’s internal structure is preserved across datasets. A module may respond to treatment in a similar direction while its co-expression pattern differs across studies. Conversely, a module may retain its internal correlation structure without showing a strong treatment association. Preservation is therefore assessed separately from the treatment effect.
+
+Module preservation can be summarised using a $Z_{\mathrm{summary}}$ statistic [@preservation], $$Z_{\text{summary}, m} = \frac{1}{K} \sum_{k=1}^K Z_{m,k}$$
+
+where each $Z_{m,k}$ is a standardised preservation component, here based on within-module density and connectivity correspondence. Each component is standardised against its own null distribution before averaging. Values below $2$ indicate little preservation, between $2$ and $10$ indicates moderate preservation, while above $10$ indicates strong preservation.
+
+The outputs include the pooled module treatment effect $\hat{\delta}_m^{\mathrm{RE}}$, its confidence interval, the meta-analytic p-value, the FDR-adjusted p-value, heterogeneity summaries and $Z_{\mathrm{summary},m}$. Modules should be interpreted using both treatment-effect reproducibility and structural preservation. This distinction matters because a module with a reproducible treatment effect is not necessarily structurally preserved, and a structurally preserved module is not necessarily treatment-responsive.
+
+The main limitation is that module definitions must be established before analysis. Results can be sensitive to how module boundaries are drawn. Biologically curated pathways provide externally defined groupings, while data-driven modules may not transfer cleanly across datasets that differ in tissue source, platform or study design. For this reason, module-level results should be presented as structured evidence about coordinated behaviour rather than as definitive proof of a shared mechanism.
+
+:::{.caution-note}
+Higher-order analysis depends on whether a pathway or module can be meaningfully represented by one dominant eigengene. This assumption is weaker when a protein set contains multiple sub-processes or when its members respond in opposing directions. Sign alignment improves comparability across datasets, but it may be unreliable when the dominant eigengene variation is unrelated to treatment. Module-level findings should therefore be interpreted jointly through treatment association and preservation rather than through the pooled eigengene effect alone.
+:::
+
+::: feature-panel
+#### Research Case Example 4
+
+**Query**: <i>"Which pathways or modules show treatment-associated structure that is reproducible across datasets?"</i>
+
+In this simulated collection, module eigengenes are extracted from the batch-adjusted log-abundance matrix within each of the $5$ sample-level datasets and sign-aligned using $S_m$ as defined above. Both curated pathways and data-driven co-expression modules from the simulation ground truth are included. Modules with fewer than $5$ constituent proteins or estimable $\hat{\delta}_{m,d}$ in fewer than $4$ datasets are excluded, and FDR correction is applied across all modules entering synthesis.
+
+**Analysis and Returned Outputs**
+
+```{r}
+# Within-dataset eigengene extraction and treatment regression 
+estimate_within_dataset_module_effects <- function(dataset,
+                                                   module_sets,
+                                                   minimum_module_coverage = default_minimum_module_coverage,
+                                                   minimum_module_size = default_minimum_module_size,
+                                                   minimum_observation_rate = default_minimum_observation_rate) {
+  metadata <- prepare_dataset_metadata(dataset)
+  abundance_matrix <- dataset$protein_abundance
+
+  observation_summary <- tibble(
+    protein_id = rownames(abundance_matrix),
+    total_observed = rowSums(!is.na(abundance_matrix)),
+    observation_rate = rowSums(!is.na(abundance_matrix)) / ncol(abundance_matrix)
+  ) |>
+    mutate(passes_filter = observation_rate >= minimum_observation_rate)
+
+  retained_proteins <- observation_summary |>
+    filter(passes_filter) |>
+    pull(protein_id)
+
+  map_dfr(names(module_sets), function(module_id) {
+    module_proteins <- module_sets[[module_id]]
+    module_size <- length(module_proteins)
+
+    if (module_size < minimum_module_size) {
+      return(tibble())
+    }
+
+    observed_proteins <- intersect(module_proteins, retained_proteins)
+    module_coverage <- length(observed_proteins) / module_size
+
+    if (module_coverage < minimum_module_coverage) {
+      return(tibble())
+    }
+
+    module_matrix <- abundance_matrix[observed_proteins, , drop = FALSE]
+    adjusted_matrix <- t(apply(module_matrix, 1, batch_adjust_vector, batch_values = metadata$batch))
+    rownames(adjusted_matrix) <- observed_proteins
+
+    sample_completeness <- colMeans(!is.na(adjusted_matrix))
+    complete_samples <- sample_completeness >= 0.50
+    adjusted_matrix <- adjusted_matrix[, complete_samples, drop = FALSE]
+    module_metadata <- metadata[complete_samples, , drop = FALSE]
+
+    if (ncol(adjusted_matrix) < 6 || n_distinct(module_metadata$condition) < 2) {
+      return(tibble())
+    }
+
+    row_means <- rowMeans(adjusted_matrix, na.rm = TRUE)
+    for (protein_index in seq_len(nrow(adjusted_matrix))) {
+      missing_index <- is.na(adjusted_matrix[protein_index, ])
+      adjusted_matrix[protein_index, missing_index] <- row_means[protein_index]
+    }
+
+    sample_by_protein_matrix <- t(adjusted_matrix)
+    principal_component_fit <- prcomp(sample_by_protein_matrix, center = TRUE, scale. = TRUE)
+    eigengene <- principal_component_fit$x[, 1]
+    
+    module_effects <- meta_analysis_results |>
+      filter(protein_id %in% observed_proteins)
+    
+    if (nrow(module_effects) > 0) {
+      activity_score <- mean(module_effects$pooled_log_effect)
+    
+      eigengene_treatment_correlation <- cor(
+        eigengene,
+        as.numeric(module_metadata$condition == "treated")
+      )
+    
+      if (is.finite(eigengene_treatment_correlation) &&
+          sign(eigengene_treatment_correlation) != sign(activity_score)) {
+        eigengene <- -eigengene
+      }
+    }
+
+    regression_data <- tibble(
+      eigengene = eigengene,
+      condition = module_metadata$condition,
+      batch = module_metadata$batch
+    )
+
+    regression_formula <- if (n_distinct(regression_data$batch) > 1) {
+      eigengene ~ condition + batch
+    } else {
+      eigengene ~ condition
+    }
+
+    regression_fit <- lm(regression_formula, data = regression_data)
+    treatment_row <- tidy(regression_fit) |>
+      filter(str_detect(term, "^condition"))
+
+    if (nrow(treatment_row) == 0) {
+      return(tibble())
+    }
+
+    tibble(
+      module_id = module_id,
+      dataset_id = dataset$dataset_id,
+      estimated_delta = treatment_row$estimate,
+      standard_error = treatment_row$std.error,
+      degrees_of_freedom = df.residual(regression_fit),
+      module_size = module_size,
+      observed_protein_count = length(observed_proteins),
+      module_coverage = module_coverage,
+      estimation_source = "sample-level eigengene regression"
+    )
+  })
+}
+compute_module_preservation <- function(full_data,
+                                        module_sets,
+                                        reference_dataset_index = 1,
+                                        n_permutations = 200,
+                                        minimum_module_size = default_minimum_module_size,
+                                        minimum_observation_rate = default_minimum_observation_rate) {
+  reference_dataset <- full_data[[reference_dataset_index]]
+  test_datasets <- full_data[-reference_dataset_index]
+
+  observation_summary <- tibble(
+    protein_id = rownames(reference_dataset$protein_abundance),
+    observation_rate = rowMeans(!is.na(reference_dataset$protein_abundance))
+  ) |>
+    mutate(passes_filter = observation_rate >= minimum_observation_rate)
+
+  retained_proteins <- observation_summary |>
+    filter(passes_filter) |>
+    pull(protein_id)
+
+  map_dfr(names(module_sets), function(module_id) {
+    module_proteins <- module_sets[[module_id]]
+    observed_proteins <- intersect(module_proteins, retained_proteins)
+
+    if (length(observed_proteins) < minimum_module_size) {
+      return(tibble())
+    }
+
+    reference_matrix <- reference_dataset$protein_abundance[observed_proteins, , drop = FALSE]
+    complete_rows <- rowSums(!is.na(reference_matrix)) >= 2
+    reference_matrix <- reference_matrix[complete_rows, , drop = FALSE]
+
+    if (nrow(reference_matrix) < minimum_module_size) {
+      return(tibble())
+    }
+
+    reference_correlation <- cor(t(reference_matrix), use = "pairwise.complete.obs")
+
+    map_dfr(test_datasets, function(test_dataset) {
+      test_proteins <- intersect(rownames(reference_matrix), rownames(test_dataset$protein_abundance))
+
+      if (length(test_proteins) < minimum_module_size) {
+        return(tibble())
+      }
+
+      test_matrix <- test_dataset$protein_abundance[test_proteins, , drop = FALSE]
+      complete_rows_test <- rowSums(!is.na(test_matrix)) >= 2
+      test_matrix <- test_matrix[complete_rows_test, , drop = FALSE]
+
+      if (nrow(test_matrix) < minimum_module_size) {
+        return(tibble())
+      }
+
+      test_correlation <- cor(t(test_matrix), use = "pairwise.complete.obs")
+      shared_proteins <- intersect(rownames(reference_correlation), rownames(test_correlation))
+
+      if (length(shared_proteins) < minimum_module_size) {
+        return(tibble())
+      }
+
+      reference_correlation_shared <- reference_correlation[shared_proteins, shared_proteins, drop = FALSE]
+      test_correlation_shared <- test_correlation[shared_proteins, shared_proteins, drop = FALSE]
+
+      observed_density <- mean(abs(test_correlation_shared[upper.tri(test_correlation_shared)]), na.rm = TRUE)
+
+      reference_connectivity <- rowMeans(abs(reference_correlation_shared), na.rm = TRUE)
+      test_connectivity <- rowMeans(abs(test_correlation_shared), na.rm = TRUE)
+      observed_connectivity_correlation <- cor(reference_connectivity, test_connectivity)
+
+      test_background_proteins <- intersect(retained_proteins, rownames(test_dataset$protein_abundance))
+
+      if (length(test_background_proteins) < length(shared_proteins)) {
+        return(tibble())
+      }
+
+      permuted_densities <- replicate(n_permutations, {
+        permuted_proteins <- sample(test_background_proteins, length(shared_proteins))
+        permuted_matrix <- test_dataset$protein_abundance[permuted_proteins, , drop = FALSE]
+
+        if (any(rowSums(!is.na(permuted_matrix)) < 2)) {
+          return(NA_real_)
+        }
+
+        permuted_correlation <- tryCatch(
+          cor(t(permuted_matrix), use = "pairwise.complete.obs"),
+          error = function(error_condition) NULL
+        )
+
+        if (is.null(permuted_correlation)) {
+          return(NA_real_)
+        }
+
+        mean(abs(permuted_correlation[upper.tri(permuted_correlation)]), na.rm = TRUE)
+      })
+
+      permuted_connectivity_correlations <- replicate(n_permutations, {
+        cor(reference_connectivity, sample(test_connectivity))
+      })
+
+      permuted_densities <- permuted_densities[is.finite(permuted_densities)]
+      permuted_connectivity_correlations <- permuted_connectivity_correlations[is.finite(permuted_connectivity_correlations)]
+
+      if (length(permuted_densities) < 10 || length(permuted_connectivity_correlations) < 10) {
+        return(tibble())
+      }
+
+      density_mean <- mean(permuted_densities)
+      density_sd <- sd(permuted_densities)
+      connectivity_mean <- mean(permuted_connectivity_correlations)
+      connectivity_sd <- sd(permuted_connectivity_correlations)
+
+      if (!is.finite(density_sd) || density_sd == 0 ||
+          !is.finite(connectivity_sd) || connectivity_sd == 0) {
+        return(tibble())
+      }
+
+      z_density <- (observed_density - density_mean) / density_sd
+      z_connectivity <- if (is.finite(observed_connectivity_correlation)) {
+        (observed_connectivity_correlation - connectivity_mean) / connectivity_sd
+      } else {
+        NA_real_
+      }
+
+      z_summary <- mean(c(z_density, z_connectivity), na.rm = TRUE)
+
+      tibble(
+        module_id = module_id,
+        reference_dataset = reference_dataset$dataset_id,
+        test_dataset = test_dataset$dataset_id,
+        z_density = z_density,
+        z_connectivity = z_connectivity,
+        z_summary = z_summary,
+        preservation_level = case_when(
+          z_summary >= 10 ~ "strong",
+          z_summary >= 2 ~ "moderate",
+          TRUE ~ "weak"
+        ),
+        module_size = length(shared_proteins)
+      )
+    })
+  })
+}
+
+all_module_sets <- c(truth$pathway_sets, truth$coexpression_modules)
+
+per_dataset_module_effects <- map_dfr(
+  full_data,
+  estimate_within_dataset_module_effects,
+  module_sets = all_module_sets,
+  minimum_module_coverage = default_minimum_module_coverage,
+  minimum_module_size = default_minimum_module_size,
+  minimum_observation_rate = default_minimum_observation_rate
+) |>
+  filter(
+    !is.na(estimated_delta),
+    !is.na(standard_error),
+    is.finite(estimated_delta),
+    is.finite(standard_error),
+    standard_error > 0,
+    degrees_of_freedom > 0
+  ) |>
+  mutate(extreme_se_flag = flag_extreme_standard_errors(standard_error))
+
+module_meta_results <- split(per_dataset_module_effects, per_dataset_module_effects$module_id) |>
+  map_dfr(
+    run_feature_meta_analysis,
+    id_col = "module_id",
+    effect_col = "estimated_delta",
+    se_col = "standard_error",
+    minimum_datasets = default_minimum_datasets_for_meta,
+    pooled_name = "pooled_delta"
+  ) |>
+  append_fdr() |>
+  arrange(false_discovery_rate)
+
+module_preservation_results <- compute_module_preservation(
+  full_data = full_data,
+  module_sets = all_module_sets,
+  reference_dataset_index = 1,
+  n_permutations = 200,
+  minimum_module_size = default_minimum_module_size,
+  minimum_observation_rate = default_minimum_observation_rate
+)
+
+module_preservation_summary <- module_preservation_results |>
+  group_by(module_id) |>
+  summarise(
+    mean_z_summary = mean(z_summary, na.rm = TRUE),
+    datasets_tested = n_distinct(test_dataset),
+    dominant_preservation = case_when(
+      mean_z_summary >= 10 ~ "strong",
+      mean_z_summary >= 2 ~ "moderate",
+      TRUE ~ "weak"
+    ),
+    .groups = "drop"
+  )
+
+joint_module_classification <- module_meta_results |>
+  transmute(
+    module_id = module_id,
+    significant_treatment_effect = false_discovery_rate < 0.05,
+    pooled_delta = pooled_delta
+  ) |>
+  left_join(
+    module_preservation_summary |>
+      transmute(module_id, mean_z_summary, dominant_preservation),
+    by = "module_id"
+  ) |>
+  mutate(
+    joint_module_pattern = case_when(
+      significant_treatment_effect & dominant_preservation == "strong" ~ "treatment-associated and well-preserved",
+      significant_treatment_effect & dominant_preservation == "moderate" ~ "treatment-associated, moderately preserved",
+      significant_treatment_effect & dominant_preservation == "weak" ~ "treatment-associated, poorly preserved",
+      !significant_treatment_effect & dominant_preservation == "strong" ~ "preserved but treatment-neutral",
+      TRUE ~ "neither"
+    )
+  )
+
+top_module_table <- module_meta_results |>
+  left_join(
+    module_preservation_summary |>
+      select(module_id, mean_z_summary, dominant_preservation),
+    by = "module_id"
+  ) |>
+  slice_head(n = 8) |>
+  transmute(
+    Module = module_id,
+    Datasets = dataset_count,
+    `Pooled delta` = pooled_delta,
+    `95% CI` = sprintf("[%.3f, %.3f]", confidence_interval_lower, confidence_interval_upper),
+    `Meta p-value` = pooled_p_value,
+    FDR = false_discovery_rate,
+    `Tau-squared` = tau_squared,
+    `I-squared (%)` = I_squared,
+    `Mean Z-summary` = mean_z_summary,
+    Preservation = dominant_preservation
+  )
+labels_to_show <- c(
+  "pathway_01",
+  "module_02",
+  "module_03",
+  "pathway_04",
+  "pathway_06",
+  "pathway_09"
+)
+
+joint_module_plot_data <- joint_module_classification |>
+  filter(!is.na(mean_z_summary)) |>
+  mutate(
+    feature_type = if_else(str_detect(module_id, "^pathway"), "Pathway", "Module"),
+    label_text = if_else(module_id %in% labels_to_show, module_id, NA_character_)
+  )
+
+joint_module_plot <- joint_module_plot_data |>
+  ggplot(aes(x = pooled_delta, y = mean_z_summary, colour = joint_module_pattern, shape = feature_type)) +
+  geom_hline(yintercept = c(2, 10), linetype = "dotted", colour = "#cfd8dc", linewidth = 0.55) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "#7f8f8b", linewidth = 0.6) +
+  geom_point(size = 4.1, alpha = 0.92) +
+  geom_text_repel(
+    data = \(data_frame) dplyr::filter(data_frame, !is.na(label_text)),
+    aes(label = label_text),
+    colour = "black",
+    size = 3.2,
+    box.padding = 1,
+    point.padding = 0.3,
+    force = 1.2,
+    force_pull = 0.4,
+    min.segment.length = 0,
+    segment.color = "black",
+    segment.size = 0.25,
+    arrow = arrow(length = unit(0.05, "inches"), type = "closed"),
+    seed = 4026,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(
+    values = c(
+      "treatment-associated and well-preserved" = effect_palette[["dataset"]],
+      "treatment-associated, moderately preserved" = effect_palette[["neutral"]],
+      "treatment-associated, poorly preserved" = effect_palette[["contrast"]],
+      "preserved but treatment-neutral" = effect_palette[["accent"]],
+      "neither" = effect_palette[["pooled"]]
+    ),
+    labels = c(
+      "treatment-associated and well-preserved" = "Associated, strong",
+      "treatment-associated, moderately preserved" = "Associated, moderate",
+      "treatment-associated, poorly preserved" = "Associated, weak",
+      "preserved but treatment-neutral" = "Preserved only",
+      "neither" = "Neither"
+    )
+  ) +
+  scale_shape_manual(values = c("Pathway" = 16, "Module" = 17)) +
+  scale_y_continuous(expand = expansion(mult = c(0.08, 0.14))) +
+  labs(
+    title = "Module treatment effect against structural preservation",
+    subtitle = "Each point is one pathway or co-expression module",
+    x = "Pooled eigengene treatment effect",
+    y = expression(Z[summary] ~ "(mean across test datasets)"),
+    colour = "Joint pattern",
+    shape = "Feature type"
+  ) +
+  platform_theme() +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right",
+    legend.direction = "vertical",
+    legend.box = "vertical"
+  )
+```
+
+pathway_01 is the dominant result in @tbl-module. It has a pooled eigengene treatment effect of $-6.030$, far larger in magnitude than any other entry in the table. Its false discovery rate is effectively zero at the displayed precision, and its preservation statistic, $Z_{\mathrm{summary}} = 39.166$, lies well above the strong-preservation threshold of $10$. Although $I^2 = 28.9\%$ and $\tau^2 = 0.024$ indicate some between-study variation in effect magnitude, that variation is modest relative to the size of the pooled signal. @fig-joint-module also shows that pathway_01 is visually isolated by extreme effect and high preservation, siting in the upper-left corner, far away from the rest of the points.
+
+Among the co-expression modules, module_02 and module_03 also pass false discovery rate correction. Their pooled effects are $0.541$ and $0.716$, and neither shows detected between-study heterogeneity. Their preservation statistics fall in the moderate range, with $Z_{\mathrm{summary}}=8.811$ for module_02 and $Z_{\mathrm{summary}}=5.339$ for module_03. In @fig-joint-module, they lie to the right of zero but neither rise into the extreme upper part of the plot. These results suggest reproducible eigengene shifts without the same level of structural preservation seen for pathway_01.
+
+pathway_06, pathway_04, and pathway_09 require a different interpretation. Each has a significant pooled treatment effect, but each also has a negative preservation statistic. This indicates that the internal correlation structure is not consistently maintained across datasets. In that setting, the eigengene may represent different axes of co-variation in different studies. pathway_09 is the least stable of these signals because it also has the largest heterogeneity estimate in the table, with $\tau^2 = 0.189$ and $I^2 = 35.9\%$.  This pattern is also visible in @fig-joint-module, where these pathways fall in the low-preservation region of the plot rather than alongside the more structurally stable higher-order signals. These pathways are therefore treatment-associated candidates rather than robust higher-order signals.
+
+```{r}
+#| label: tbl-module
+#| echo: false
+render_output_table(
+  top_module_table,
+  caption = "Top pathways and modules from cross-dataset higher-order synthesis",
+  digits = 3
+)
+```
+
+```{r}
+#| label: fig-joint-module
+#| fig-cap: "Module treatment effect against structural preservation across datasets."
+#| echo: false
+joint_module_plot
+```
+:::
+
+## Conclusion
+
+This report set out to determine whether a shared omics platform can support statistically credible cross-dataset proteomics analysis rather than simple data co-storage. The results show that it can, provided that inference begins with harmonised preprocessing and carries uncertainty through explicit cross-study synthesis. In the simulated collection, the clearest reproducible signal came from protein-level treatment effects, where a small set of proteins showed strong pooled effects with low heterogeneity and stable leave-one-dataset-out behaviour. At the pathway level, pathway_01 showed that treatment-associated structure can also remain coherent beyond individual proteins when the pooled eigengene effect is paired with strong preservation.
+
+The framework also clarifies where evidence is weaker. Dispersion analysis did not identify reproducible variance shifts after multiplicity correction, and association analysis produced stable candidate pairs that did not survive the larger testing burden created by pairwise screening. These results show why the platform needs more than nominal significance. It must distinguish findings that are reproducible enough to prioritise from findings that require more targeted follow-up before biological interpretation.
+
+## References
